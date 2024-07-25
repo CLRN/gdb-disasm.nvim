@@ -147,18 +147,29 @@ vim.keymap.set("n", "<leader>dc", function()
 
   local binary, args = make_disasm_command_and_args(cmd)
 
-  vim.notify(string.format("running %s %s", binary, table.concat(args, " ")))
+  vim.notify(string.format("running %s %s", binary, table.concat(args, " ")), vim.log.levels.DEBUG)
+  local errors = {}
 
   Job:new({
     command = binary,
     args = args,
+
+    on_stderr = function(err, line)
+      table.insert(errors, line)
+    end,
+
     on_exit = function(j, return_val)
       if return_val == 0 then
         vim.schedule(function ()
           draw_disasm(j:result())
         end)
       else
-        vim.notify(string.format("failed to build asm, code: %s", return_val), vim.log.levels.ERROR)
+        vim.schedule(function ()
+          table.insert(errors, string.format("failed to build asm, %s exited with code: %s", binary, return_val))
+          vim.fn.setqflist({}, " ", { lines = errors })
+          vim.api.nvim_command("copen")
+          vim.api.nvim_command("cbottom")
+        end)
       end
     end,
   }):start()

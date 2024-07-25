@@ -1,5 +1,7 @@
 local Job = require 'plenary.job'
 
+local ns_id = vim.api.nvim_create_namespace "disnav"
+
 --- @return table|nil
 local function load_commands()
   local status, cmake = pcall(require, "cmake-tools")
@@ -25,9 +27,7 @@ end
 --- @return string|nil
 local function get_build_command_for_current_file(data)
   local cur_file = vim.fn.expand('%:p')
-  -- vim.print(string.format("current file: %s", cur_file))
   for _, target in ipairs(data) do
-    -- vim.print(string.format("cmd file: %s", target.file))
     if target.file == cur_file then
       return target.command
     end
@@ -68,22 +68,98 @@ local function make_disasm_command_and_args(command)
   return executable, res
 end
 
-local data = load_commands()
-local cmd = get_build_command_for_current_file(data)
-local binary, args = make_disasm_command_and_args(cmd)
-vim.print(string.format("running %s with %s", binary, table.concat(args, " ")))
-Job:new({
-  command = binary,
-  args = args,
-  on_exit = function(j, return_val)
-    if return_val == 0 then
-      for _, v in ipairs(j:result()) do
-        vim.print(v)
-      end
-    else
-      vim.notify(string.format("failed to build asm, code: %s", return_val), vim.log.levels.ERROR)
-    end
-  end,
-}):sync()
+-- @param data table
+-- @return table
+local function create_disasm(data)
+  local files = {}
+  local last_file = nil
+  local last_line = nil
 
--- vim.json.decode()
+  for _, line in ipairs(data) do
+    -- "10:/workarea/disnav/perf.cpp ****     std::string s(test, 'a');"
+    local line_num, file = string.match(line, "(%d+):([^%s]+)")
+    line_num = tonumber(line_num)
+    if line_num and file then
+      last_line = line_num
+      last_file = file
+    elseif last_file and last_line then
+      -- "1356 0009 48897D98 		mov	QWORD PTR [rbp-104], rdi"
+      local asm = string.match(line, "%d+%s%w+%s%w+%s+(.+)$")
+      if asm then
+        if files[last_file] == nil then
+          files[last_file] = {}
+        end
+        if files[last_file][last_line] == nil then
+          files[last_file][last_line] = {}
+        end
+
+        table.insert(files[last_file][last_line], asm)
+      end
+    end
+  end
+
+  return files
+end
+
+
+-- @param data table
+local function draw_disasm(data)
+  vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
+
+  local disasm = create_disasm(data)
+  local cur_file = vim.fn.expand('%:p')
+  for line_num, text in pairs(disasm[cur_file]) do
+    local virt_lines = {}
+    for _, line in ipairs(text) do
+      table.insert(virt_lines, { { "    " .. line, "Comment" } })
+    end
+
+    local col_num = 0
+    local mark_id = vim.api.nvim_buf_set_extmark(0, ns_id, line_num - 1, col_num, {
+      virt_lines = virt_lines,
+    })
+  end
+end
+
+vim.keymap.set("n", "<leader>dq", function()
+  vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
+end, { remap = true })
+
+vim.keymap.set("n", "<leader>dd", function()
+  local lines = {}
+  for line in io.lines("out.txt") do
+    lines[#lines + 1] = line
+  end
+  draw_disasm(lines)
+end, { remap = true })
+
+vim.keymap.set("n", "<leader>dc", function()
+  local data = load_commands()
+  if not data then
+    return
+  end
+
+  local cmd = get_build_command_for_current_file(data)
+  if not cmd then
+    vim.notify(string.format("failed to get build command for current file"), vim.log.levels.ERROR)
+    return
+  end
+
+  local binary, args = make_disasm_command_and_args(cmd)
+
+  vim.notify(string.format("running %s %s", binary, table.concat(args, " ")))
+
+  Job:new({
+    command = binary,
+    args = args,
+    on_exit = function(j, return_val)
+      if return_val == 0 then
+        vim.schedule(function ()
+          draw_disasm(j:result())
+        end)
+      else
+        vim.notify(string.format("failed to build asm, code: %s", return_val), vim.log.levels.ERROR)
+      end
+    end,
+  }):start()
+end, { remap = true })

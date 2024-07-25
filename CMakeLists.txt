@@ -16,6 +16,7 @@ enable_testing()
 
 add_executable(perf 
   perf.cpp
+  func.cpp
 )
 
 target_link_libraries(perf PRIVATE

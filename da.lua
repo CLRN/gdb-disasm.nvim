@@ -75,34 +75,30 @@ end
 -- @param file_name string
 -- @return table
 local function create_disasm(data, file_name)
-  local files = {}
-  local last_file = nil
+  local lines = {}
   local last_line = nil
 
   for _, line in ipairs(data) do
     -- "10:/workarea/disnav/perf.cpp ****     std::string s(test, 'a');"
     local line_num, file = string.match(line, "(%d+):([^%s]+)")
     line_num = tonumber(line_num)
-    if line_num and file and file == file_name then
-      last_line = line_num
-      last_file = file
-    elseif last_file and last_line then
-      -- "1356 0009 48897D98 		mov	QWORD PTR [rbp-104], rdi"
-      local asm = string.match(line, disasm_pattern)
-      if asm then
-        if files[last_file] == nil then
-          files[last_file] = {}
-        end
-        if files[last_file][last_line] == nil then
-          files[last_file][last_line] = {}
-        end
 
-        table.insert(files[last_file][last_line], asm)
+    if file == file_name then
+      last_line = line_num
+    end
+
+    local asm = string.match(line, disasm_pattern)
+    if asm and last_line then
+      -- "1356 0009 48897D98 		mov	QWORD PTR [rbp-104], rdi"
+      if lines[last_line] == nil then
+        lines[last_line] = {}
       end
+
+      table.insert(lines[last_line], asm)
     end
   end
 
-  return files
+  return lines
 end
 
 
@@ -112,7 +108,7 @@ local function draw_disasm(data, file_name)
   vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
 
   local disasm = create_disasm(data, file_name)
-  for line_num, text in pairs(disasm[file_name]) do
+  for line_num, text in pairs(disasm) do
     local virt_lines = {}
     for _, line in ipairs(text) do
       table.insert(virt_lines, { { line, "Comment" } })

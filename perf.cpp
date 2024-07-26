@@ -36,3 +36,4 @@ int main(int argc, char** argv) {
     std::string s(argc, 'a');
     return s.size();
 }
+

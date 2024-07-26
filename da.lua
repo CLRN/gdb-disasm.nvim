@@ -60,6 +60,8 @@ local function make_disasm_command_and_args(command)
     end
   end
 
+  table.insert(res, "-o")
+  table.insert(res, "/dev/null")
   table.insert(res, "-Wa,-adhln")
   table.insert(res, "-g")
   table.insert(res, "-masm=intel")
@@ -77,10 +79,10 @@ end
 -- @return table
 local function create_disasm(data, file_name)
   local lines = {}
+  local labels = {}
   local last_line = nil
   local last_code_hint_line = nil
   local last_code_hint_file = nil
-  local last_reported_hint = nil
 
   for _, line in ipairs(data) do
     -- "10:/workarea/disnav/perf.cpp ****     std::string s(test, 'a');"
@@ -96,22 +98,30 @@ local function create_disasm(data, file_name)
     end
 
     local asm = string.match(line, disasm_pattern)
+    if not asm then
+      local label_define = string.match(line, "[^\\.]+[\\.](L%d+):$")
+      if label_define and labels[label_define] then
+        asm = label_define .. ":"
+        vim.print(string.format("found label define %s", asm))
+      end
+    end
+
     if asm and last_line then
+      local label_jump = string.match(line, "[^\\.]+[\\.](L%d+)$")
+      if label_jump then
+        labels[label_jump] = true
+        vim.print(string.format("saving label %s", label_jump))
+      end
+
       -- "1356 0009 48897D98 		mov	QWORD PTR [rbp-104], rdi"
       if lines[last_line] == nil then
         lines[last_line] = {}
       end
 
-      if last_code_hint_file ~= file_name and last_code_hint_line and last_code_hint_line ~= last_reported_hint then
-        local n = string.find(last_code_hint_line, "****", 1, true) or 1
-        local hint = string.sub(last_code_hint_line, n + 5):match("^%s*(.-)%s*$")
-        if #hint > 1 then
-          asm = string.format("%-90s %s", asm, last_code_hint_line:match("^%s*(.-)%s*$"))
-        end
-        -- last_reported_hint = last_code_hint_line
+      if last_code_hint_file ~= file_name and last_code_hint_line then
+        asm = string.format("%-90s %s", asm, last_code_hint_line:match("^%s*(.-)%s*$"))
       end
 
-      vim.print(asm)
       table.insert(lines[last_line], asm)
     end
   end
@@ -201,6 +211,9 @@ vim.keymap.set("n", "<leader>dal", function()
 end, { remap = true })
 
 
+local j = "1845 0026 7566             jne    .L111"
+local l = "2142                  .L111:"
+vim.print(string.match(l, "[^\\.]+[\\.](L%d+):$"))
 -- local s = " 3673:/opt/rh/devtoolset-11/root/usr/include/c++/11/bits/basic_string.h ****       : _M_dataplus(_S_construct(__n, __c, __a), __a)"
 -- local n = string.find(s, "****", 1, true)
 -- vim.print(string.format("n: %s, %s", n, string.sub(s, n)))

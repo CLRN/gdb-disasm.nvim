@@ -66,7 +66,8 @@ local function make_disasm_command_and_args(command)
   table.insert(res, "-fno-asynchronous-unwind-tables")
   table.insert(res, "-fno-dwarf2-cfi-asm")
   table.insert(res, "-fno-exceptions")
-  table.insert(res, "|c++filt")
+  table.insert(res, "| c++filt")
+  table.insert(res, "| sed 's/\t/    /g'")
 
   return "bash", {"-c", table.concat(res, " ")}
 end
@@ -77,11 +78,18 @@ end
 local function create_disasm(data, file_name)
   local lines = {}
   local last_line = nil
+  local last_code_hint_line = nil
+  local last_code_hint_file = nil
+  local last_reported_hint = nil
 
   for _, line in ipairs(data) do
     -- "10:/workarea/disnav/perf.cpp ****     std::string s(test, 'a');"
     local line_num, file = string.match(line, "(%d+):([^%s]+)")
     line_num = tonumber(line_num)
+    if line_num then
+      last_code_hint_line = line
+      last_code_hint_file = file
+    end
 
     if file == file_name then
       last_line = line_num
@@ -94,6 +102,16 @@ local function create_disasm(data, file_name)
         lines[last_line] = {}
       end
 
+      if last_code_hint_file ~= file_name and last_code_hint_line and last_code_hint_line ~= last_reported_hint then
+        local n = string.find(last_code_hint_line, "****", 1, true) or 1
+        local hint = string.sub(last_code_hint_line, n + 5):match("^%s*(.-)%s*$")
+        if #hint > 1 then
+          asm = string.format("%-90s %s", asm, last_code_hint_line:match("^%s*(.-)%s*$"))
+        end
+        -- last_reported_hint = last_code_hint_line
+      end
+
+      vim.print(asm)
       table.insert(lines[last_line], asm)
     end
   end
@@ -183,7 +201,9 @@ vim.keymap.set("n", "<leader>dal", function()
 end, { remap = true })
 
 
--- vim.print(string.match(" 1356 0009 48897D98 		mov	QWORD PTR [rbp-104], rdi", "^%s%d+%s[0-9A-H]+%s[0-9A-H]+%s+(.+)$"))
+-- local s = " 3673:/opt/rh/devtoolset-11/root/usr/include/c++/11/bits/basic_string.h ****       : _M_dataplus(_S_construct(__n, __c, __a), __a)"
+-- local n = string.find(s, "****", 1, true)
+-- vim.print(string.format("n: %s, %s", n, string.sub(s, n)))
 -- vim.print(string.match(" 1868 001c E8000000 		call	calc(int, int)", disasm_pattern))
 -- dev@docker:/workarea/disnav$ /opt/bb/bin/g++ -S perf.cpp -fverbose-asm -masm=intel -Os -o - | c++filt
 -- dev@docker:/workarea/disnav$ /opt/bb/bin/g++ -isystem /opt/bb/include -D_GLIBCXX_USE_CXX11_ABI=0 -march=westmere -m64 -fno-strict-aliasing -g -O2 -fno-omit-frame-pointer -std=gnu++20 -Werror=all -Wno-deprecated-declarations -Wno-error=deprecated-declarations -fdiagnostics-color=always -c /workarea/disnav/perf.cpp -S -fverbose-asm -masm=intel -Os -o - |c++filt | less

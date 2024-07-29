@@ -323,9 +323,9 @@ vim.keymap.set("n", "<leader>dat", function()
       local addr, asm = string.match(str, "^%s+(0x[0-9a-h]+)%s+<[^>]+>:([^\n]+)")
       if addr and asm then
         local t = comms(string.format("list *%s", addr))
-        local s = t[1]
-        local last = #s - s:reverse():find(" ") + 1
-        s = s:sub(last + 2, -4)
+        local raw = t[1]
+        local last = #raw - raw:reverse():find(" ") + 1
+        local s = raw:sub(last + 2, -4)
         local delim = s:find(":")
 
         local file = s:sub(1, delim - 1)
@@ -333,7 +333,8 @@ vim.keymap.set("n", "<leader>dat", function()
         if line and cur_file == file then
           last_line = line
         else
-          -- vim.print(string.format("unmatched file %s against %s", s, cur_file))
+          asm = string.format("%-90s // %s:%s", asm, file, line)
+          vim.print(string.format("unmatched file %s against %s", t[1], cur_file))
         end
 
         if not disasm[last_line] then

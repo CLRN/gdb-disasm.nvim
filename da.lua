@@ -1,4 +1,5 @@
 local Job = require 'plenary.job'
+local async = require "plenary.async"
 
 local ns_id = vim.api.nvim_create_namespace "disnav"
 local disasm_lines = {}
@@ -65,9 +66,9 @@ local function make_disasm_command_and_args(command)
   table.insert(res, "-Wa,-adhln")
   table.insert(res, "-g")
   table.insert(res, "-masm=intel")
-  table.insert(res, "-fno-asynchronous-unwind-tables")
-  table.insert(res, "-fno-dwarf2-cfi-asm")
-  table.insert(res, "-fno-exceptions")
+  -- table.insert(res, "-fno-asynchronous-unwind-tables")
+  -- table.insert(res, "-fno-dwarf2-cfi-asm")
+  -- table.insert(res, "-fno-exceptions")
   table.insert(res, "| c++filt")
   table.insert(res, "| sed 's/\t/    /g'")
 
@@ -188,6 +189,7 @@ vim.keymap.set("n", "<leader>dac", function()
     end,
 
     on_exit = function(j, return_val)
+      vim.notify(string.format("disasm completed with code %s", return_val), vim.log.levels.DEBUG)
       if return_val == 0 then
         disasm_lines = j:result()
         vim.schedule(function ()
@@ -210,10 +212,215 @@ vim.keymap.set("n", "<leader>dal", function()
   vim.api.nvim_buf_set_lines(0, 0, -1, false, disasm_lines)
 end, { remap = true })
 
+local ts_utils = require'nvim-treesitter.ts_utils'
 
-local j = "1845 0026 7566             jne    .L111"
-local l = "2142                  .L111:"
-vim.print(string.match(l, "[^\\.]+[\\.](L%d+):$"))
+local function get_current_function_range()
+  local current_node = ts_utils.get_node_at_cursor()
+  local expr = current_node
+
+  while expr do
+    if expr:type() == 'function_definition' then
+      break
+    end
+    expr = expr:parent()
+  end
+
+  if not expr then return 0, 0 end
+  local range = vim.treesitter.get_range(expr)
+  return range[1], range[4]
+  --
+  -- local node = expr:child(1)
+  -- -- local range = vim.treesitter.get_node_range(node)
+  --
+  -- -- vim.print(start_row, end_row)
+  --
+  -- vim.print(string.format("function line range: %s - %s", range[1], range[4]))
+  -- -- vim.print(string.format("node end: %s", node:end_()))
+  -- return (ts_utils.get_node_text()) --[1]
+end
+
+-- vim.print(get_current_function_name())
+
+local function start_gdb()
+  local setter, getter = async.control.channel.mpsc()
+  local job = Job:new({
+    command = "gdb",
+    args = { "--interpreter", "mi" },
+
+    on_stdout = function(err, line)
+      setter.send(line)
+    end,
+
+    on_stderr = function(err, line)
+      vim.print("error: " .. line)
+    end,
+
+    on_exit = function(j, return_val)
+      vim.notify(string.format("GDB terminated with %s", return_val), vim.log.levels.ERROR)
+    end,
+  })
+  job:start()
+
+  local function communicate(command)
+    vim.print("writing '" .. command .. "'")
+    job:send(command .. "\n")
+
+    local lines = {}
+    while true do
+      local line = getter.recv()
+      if string.sub(line, 1, 1) == "^" then
+        return lines
+      end
+
+      if string.sub(line, 1, 1) == "~" then
+        table.insert(lines, vim.json.decode(string.sub(line, 2)))
+      end
+    end
+  end
+
+  return job, communicate
+end
+
+vim.keymap.set("n", "<leader>dat", function()
+  local cur_file = vim.fn.expand('%:p')
+  local line_start, line_end = get_current_function_range()
+
+  async.run(function()
+
+    local status, cmake = pcall(require, "cmake-tools")
+    if not status then
+      vim.notify("unable to load cmake-tools", vim.log.levels.ERROR)
+      return
+    end
+    local target = cmake.get_launch_target()
+    if not target then
+      vim.notify("unable to load cmake target", vim.log.levels.ERROR)
+      return
+    end
+
+    local path = cmake.get_launch_path(target) .. target
+
+    local job, comms = start_gdb()
+
+    -- set some settings
+    comms("set disassembly-flavor intel")
+    comms("set print asm-demangle")
+
+    -- load file
+    comms(string.format("file %s", path))
+
+    -- fetch what's the function name for the given lines
+    local info = comms(string.format("info line %s:%s", cur_file, line_start + math.floor((line_end - line_start) / 2)))
+    local func_name = string.match(info[1], "<([^\\+]+)")
+
+    -- disasm currrent function
+    local response = comms(string.format("disassemble %s", func_name))
+
+    local disasm = {}
+    local last_line = 1
+
+    for _, str in ipairs(response) do
+      local addr, asm = string.match(str, "^%s+(0x[0-9a-h]+)%s+<[^>]+>:%s+([^%s]+%s+0x[0-9a-h]+%s+.+)[\n]$")
+      if addr and asm then
+        local t = comms(string.format("list *%s", addr))
+        local s = t[1]
+        local last = #s - s:reverse():find(" ") + 1
+        s = s:sub(last + 2, -4)
+        local delim = s:find(":")
+
+        local file = s:sub(1, delim - 1)
+        local line = tonumber(s:sub(delim + 1))
+        if line and cur_file == file then
+          last_line = line
+        else
+          -- vim.print(string.format("unmatched file %s against %s", s, cur_file))
+        end
+
+        if not disasm[last_line] then
+          disasm[last_line] = {}
+        end
+
+        table.insert(disasm[last_line], asm)
+      end
+    end
+
+    vim.schedule(function ()
+      vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
+
+      for line_num, text in pairs(disasm) do
+        local virt_lines = {}
+        for _, line in ipairs(text) do
+          -- vim.print(string.format("line num: %s, line text: %s", line_num, line))
+          table.insert(virt_lines, { { line, "Comment" } })
+        end
+
+        local col_num = 0
+        vim.api.nvim_buf_set_extmark(0, ns_id, line_num - 1, col_num, {
+          virt_lines = virt_lines,
+        })
+      end
+    end)
+
+    job:shutdown()
+  end)
+end, { remap = true })
+
+local s = "line info: 'Line 1094 of \"/workarea/mddx/groups/f_bmesix/pipelinesegments/blps_bmesixmarketdataprocessor.cpp\" is at address 0x6bf777 <BloombergLP::Mddx::blps::BmesixMarketDataProcessor::process(BloombergLP::frl::AggregatedBook const&)+791> but contains no code.\n"
+print()
+
+-- TODO: 
+-- 1. get current TS node, traverse until function_definition is found
+-- 2. get line number for that definition
+-- 3. run "gdb cmake-build/RelWithDebInfo/perf -ex "info line /workarea/mddx/internal/perf/perf.cpp:58" -ex quit "
+-- 4. parse "Line 58 of "/workarea/mddx/internal/perf/perf.cpp" is at address 0x585380 <bm_book<float>(benchmark::State&)> but contains no code." to get bm_book<float>
+-- 5. run "gdb cmake-build/RelWithDebInfo/perf -ex 'set disassembly-flavor intel' -ex 'set print asm-demangle' -ex "disassemble /m '/workarea/mddx/internal/perf/perf.cpp'::bm_book<float>" -ex quit"
+-- 6. parse:
+-- 99              sum += state.iterations();
+--    0x00000000005855df <+607>:   sub    eax,DWORD PTR [rbx]
+--    0x00000000005855e1 <+609>:   add    r14d,eax
+--
+-- 100             std::cout << sum << std::endl;
+--    0x00000000005855e4 <+612>:   mov    edi,0x1e4c180
+--    0x00000000005855e9 <+617>:   mov    esi,r14d
+--    0x00000000005855ec <+620>:   call   0x40e170 <std::basic_ostream<char, std::char_traits<char> >::operator<<(int)@plt>
+--    0x00000000005855f1 <+625>:   mov    r12,rax
+-- alternatively:
+-- 2. get function name 
+-- 3. run "gdb cmake-build/RelWithDebInfo/perf -ex 'set print asm-demangle' -ex "info functions bm_book.*" -ex quit"
+-- 4. parse:
+-- All functions matching regular expression "bm_book.*":
+--
+-- or:
+-- gdb cmake-build/RelWithDebInfo/applications/bmesix/bmesix -ex 'set disassembly-flavor intel' -ex 'set print asm-demangle' -ex "info line /opt/bb/include/fblsr_selectors.h:141" -ex quit
+-- gdb cmake-build/RelWithDebInfo/applications/bmesix/bmesix -ex 'set disassembly-flavor intel' -ex 'set print asm-demangle' -ex "disassemble /m 0x667500" -ex quit
+--
+-- or: 
+-- get address from line as above, then load until function end 
+-- gdb cmake-build/RelWithDebInfo/applications/bmesix/bmesix -ex 'set disassembly-flavor intel' -ex 'set print asm-demangle' -ex "disassemble /m 0x6bf4f8,+1024" -ex quit
+--
+-- !!! seems like disasm by function name is not reliable enough, so we will do this from current cursor until function end
+-- 1. get line range, save
+-- 2. get line info for the current line, parse function name and address
+-- 3. disasm next N instructions until reach function line range end
+--
+--
+--
+-- these work just fine: disassemble  BloombergLP::Mddx::blps::BmesixMarketDataProcessor::process(BloombergLP::frl::AggregatedBook const&)
+-- but when we add /m it stops early, this is what we need to solve
+--
+-- !! slow but reliable:
+-- 1. dump disasm without source code: disassemble  BloombergLP::Mddx::blps::BmesixMarketDataProcessor::process(BloombergLP::frl::AggregatedBook const&)
+-- 2. resolve listing per address: list  *0x00000000006bf506 
+--
+-- File /workarea/mddx/internal/perf/perf.cpp:
+-- 59:     void bm_book<float>(benchmark::State&);
+-- 59:     void bm_book<int>(benchmark::State&);
+-- 5. run picker for them
+-- 6. continue from 5. 
+
+-- local j = "1845 0026 7566             jne    .L111"
+-- local l = "2142                  .L111:"
+-- vim.print(string.match(l, "[^\\.]+[\\.](L%d+):$"))
 -- local s = " 3673:/opt/rh/devtoolset-11/root/usr/include/c++/11/bits/basic_string.h ****       : _M_dataplus(_S_construct(__n, __c, __a), __a)"
 -- local n = string.find(s, "****", 1, true)
 -- vim.print(string.format("n: %s, %s", n, string.sub(s, n)))
@@ -221,3 +428,4 @@ vim.print(string.match(l, "[^\\.]+[\\.](L%d+):$"))
 -- dev@docker:/workarea/disnav$ /opt/bb/bin/g++ -S perf.cpp -fverbose-asm -masm=intel -Os -o - | c++filt
 -- dev@docker:/workarea/disnav$ /opt/bb/bin/g++ -isystem /opt/bb/include -D_GLIBCXX_USE_CXX11_ABI=0 -march=westmere -m64 -fno-strict-aliasing -g -O2 -fno-omit-frame-pointer -std=gnu++20 -Werror=all -Wno-deprecated-declarations -Wno-error=deprecated-declarations -fdiagnostics-color=always -c /workarea/disnav/perf.cpp -S -fverbose-asm -masm=intel -Os -o - |c++filt | less
 -- getGccDumpOptions(gccDumpOptions, outputFilename: string) {
+-- dev@docker:/workarea/mddx$ gdb cmake-build/RelWithDebInfo/perf -ex 'set disassembly-flavor intel' -ex 'set print asm-demangle' -ex "disassemble /m '/workarea/mddx/internal/perf/perf.cpp'::bm_book<int>" -ex quit

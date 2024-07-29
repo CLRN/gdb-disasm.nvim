@@ -309,18 +309,18 @@ vim.keymap.set("n", "<leader>dat", function()
     -- load file
     comms(string.format("file %s", path))
 
-    -- fetch what's the function name for the given lines
+    -- fetch what's the function address for the given lines
     local info = comms(string.format("info line %s:%s", cur_file, line_start + math.floor((line_end - line_start) / 2)))
-    local func_name = string.match(info[1], "<([^\\+]+)")
+    local func_addr = string.match(info[1], "0x[0-9a-h]+")
 
-    -- disasm currrent function
-    local response = comms(string.format("disassemble %s", func_name))
+    -- disasm function address
+    local response = comms(string.format("disassemble %s", func_addr))
 
     local disasm = {}
     local last_line = 1
 
     for _, str in ipairs(response) do
-      local addr, asm = string.match(str, "^%s+(0x[0-9a-h]+)%s+<[^>]+>:%s+([^%s]+%s+0x[0-9a-h]+%s+.+)[\n]$")
+      local addr, asm = string.match(str, "^%s+(0x[0-9a-h]+)%s+<[^>]+>:([^\n]+)")
       if addr and asm then
         local t = comms(string.format("list *%s", addr))
         local s = t[1]
@@ -351,7 +351,7 @@ vim.keymap.set("n", "<leader>dat", function()
         local virt_lines = {}
         for _, line in ipairs(text) do
           -- vim.print(string.format("line num: %s, line text: %s", line_num, line))
-          table.insert(virt_lines, { { line, "Comment" } })
+          table.insert(virt_lines, { { "    " .. line, "Comment" } })
         end
 
         local col_num = 0
@@ -365,67 +365,8 @@ vim.keymap.set("n", "<leader>dat", function()
   end)
 end, { remap = true })
 
-local s = "line info: 'Line 1094 of \"/workarea/mddx/groups/f_bmesix/pipelinesegments/blps_bmesixmarketdataprocessor.cpp\" is at address 0x6bf777 <BloombergLP::Mddx::blps::BmesixMarketDataProcessor::process(BloombergLP::frl::AggregatedBook const&)+791> but contains no code.\n"
-print()
 
 -- TODO: 
--- 1. get current TS node, traverse until function_definition is found
--- 2. get line number for that definition
--- 3. run "gdb cmake-build/RelWithDebInfo/perf -ex "info line /workarea/mddx/internal/perf/perf.cpp:58" -ex quit "
--- 4. parse "Line 58 of "/workarea/mddx/internal/perf/perf.cpp" is at address 0x585380 <bm_book<float>(benchmark::State&)> but contains no code." to get bm_book<float>
--- 5. run "gdb cmake-build/RelWithDebInfo/perf -ex 'set disassembly-flavor intel' -ex 'set print asm-demangle' -ex "disassemble /m '/workarea/mddx/internal/perf/perf.cpp'::bm_book<float>" -ex quit"
--- 6. parse:
--- 99              sum += state.iterations();
---    0x00000000005855df <+607>:   sub    eax,DWORD PTR [rbx]
---    0x00000000005855e1 <+609>:   add    r14d,eax
+-- add inline annnotations
+-- make it exit cleanly
 --
--- 100             std::cout << sum << std::endl;
---    0x00000000005855e4 <+612>:   mov    edi,0x1e4c180
---    0x00000000005855e9 <+617>:   mov    esi,r14d
---    0x00000000005855ec <+620>:   call   0x40e170 <std::basic_ostream<char, std::char_traits<char> >::operator<<(int)@plt>
---    0x00000000005855f1 <+625>:   mov    r12,rax
--- alternatively:
--- 2. get function name 
--- 3. run "gdb cmake-build/RelWithDebInfo/perf -ex 'set print asm-demangle' -ex "info functions bm_book.*" -ex quit"
--- 4. parse:
--- All functions matching regular expression "bm_book.*":
---
--- or:
--- gdb cmake-build/RelWithDebInfo/applications/bmesix/bmesix -ex 'set disassembly-flavor intel' -ex 'set print asm-demangle' -ex "info line /opt/bb/include/fblsr_selectors.h:141" -ex quit
--- gdb cmake-build/RelWithDebInfo/applications/bmesix/bmesix -ex 'set disassembly-flavor intel' -ex 'set print asm-demangle' -ex "disassemble /m 0x667500" -ex quit
---
--- or: 
--- get address from line as above, then load until function end 
--- gdb cmake-build/RelWithDebInfo/applications/bmesix/bmesix -ex 'set disassembly-flavor intel' -ex 'set print asm-demangle' -ex "disassemble /m 0x6bf4f8,+1024" -ex quit
---
--- !!! seems like disasm by function name is not reliable enough, so we will do this from current cursor until function end
--- 1. get line range, save
--- 2. get line info for the current line, parse function name and address
--- 3. disasm next N instructions until reach function line range end
---
---
---
--- these work just fine: disassemble  BloombergLP::Mddx::blps::BmesixMarketDataProcessor::process(BloombergLP::frl::AggregatedBook const&)
--- but when we add /m it stops early, this is what we need to solve
---
--- !! slow but reliable:
--- 1. dump disasm without source code: disassemble  BloombergLP::Mddx::blps::BmesixMarketDataProcessor::process(BloombergLP::frl::AggregatedBook const&)
--- 2. resolve listing per address: list  *0x00000000006bf506 
---
--- File /workarea/mddx/internal/perf/perf.cpp:
--- 59:     void bm_book<float>(benchmark::State&);
--- 59:     void bm_book<int>(benchmark::State&);
--- 5. run picker for them
--- 6. continue from 5. 
-
--- local j = "1845 0026 7566             jne    .L111"
--- local l = "2142                  .L111:"
--- vim.print(string.match(l, "[^\\.]+[\\.](L%d+):$"))
--- local s = " 3673:/opt/rh/devtoolset-11/root/usr/include/c++/11/bits/basic_string.h ****       : _M_dataplus(_S_construct(__n, __c, __a), __a)"
--- local n = string.find(s, "****", 1, true)
--- vim.print(string.format("n: %s, %s", n, string.sub(s, n)))
--- vim.print(string.match(" 1868 001c E8000000 		call	calc(int, int)", disasm_pattern))
--- dev@docker:/workarea/disnav$ /opt/bb/bin/g++ -S perf.cpp -fverbose-asm -masm=intel -Os -o - | c++filt
--- dev@docker:/workarea/disnav$ /opt/bb/bin/g++ -isystem /opt/bb/include -D_GLIBCXX_USE_CXX11_ABI=0 -march=westmere -m64 -fno-strict-aliasing -g -O2 -fno-omit-frame-pointer -std=gnu++20 -Werror=all -Wno-deprecated-declarations -Wno-error=deprecated-declarations -fdiagnostics-color=always -c /workarea/disnav/perf.cpp -S -fverbose-asm -masm=intel -Os -o - |c++filt | less
--- getGccDumpOptions(gccDumpOptions, outputFilename: string) {
--- dev@docker:/workarea/mddx$ gdb cmake-build/RelWithDebInfo/perf -ex 'set disassembly-flavor intel' -ex 'set print asm-demangle' -ex "disassemble /m '/workarea/mddx/internal/perf/perf.cpp'::bm_book<int>" -ex quit

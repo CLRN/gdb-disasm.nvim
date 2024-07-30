@@ -66,7 +66,8 @@ end
 
 local function disasm_current_func()
   local cur_file = vim.fn.expand('%:p')
-  local line_start, line_end = get_current_function_range()
+  -- local line_start, line_end = get_current_function_range()
+  local line_start, _ = unpack(vim.api.nvim_win_get_cursor(0))
 
   async.run(function()
     local status, cmake = pcall(require, "cmake-tools")

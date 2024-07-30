@@ -34,11 +34,15 @@ local function start_gdb()
     end,
 
     on_stderr = function(err, line)
-      vim.print("error: " .. line)
+      vim.notify(string.format("GDB error %s", line), vim.log.levels.ERROR)
     end,
 
     on_exit = function(j, return_val)
-      vim.notify(string.format("GDB terminated with %s", return_val), vim.log.levels.ERROR)
+      if return_val ~= 0 then
+        vim.notify(string.format("GDB terminated with %s", return_val), vim.log.levels.ERROR)
+      else
+        vim.notify(string.format("GDB terminated cleanly"), vim.log.levels.INFO)
+      end
     end,
   })
 
@@ -66,8 +70,8 @@ end
 
 local function disasm_current_func()
   local cur_file = vim.fn.expand('%:p')
-  -- local line_start, line_end = get_current_function_range()
-  local line_start, _ = unpack(vim.api.nvim_win_get_cursor(0))
+  local line_start, line_end = get_current_function_range()
+  local cursor_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
 
   async.run(function()
     local status, cmake = pcall(require, "cmake-tools")
@@ -98,7 +102,7 @@ local function disasm_current_func()
     end
 
     -- fetch what's the function address for the given lines
-    local info = COMMS(string.format("info line %s:%s", cur_file, line_start))
+    local info = COMMS(string.format("info line %s:%s", cur_file, cursor_line))
     local func_addr = string.match(info[1], "0x[0-9a-h]+")
 
     -- disasm function address
@@ -132,7 +136,10 @@ local function disasm_current_func()
         end
 
         table.insert(LAST_DISASM_LINES, string.format("%-90s // %s:%s", asm, file, last_line))
-        table.insert(disasm[last_line], asm)
+
+        if last_line <= line_end + 1 and last_line >= line_start then
+          table.insert(disasm[last_line], asm)
+        end
       end
     end
 

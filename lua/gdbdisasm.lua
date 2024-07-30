@@ -157,7 +157,7 @@ end
 M = {}
 
 M.setup = function(cfg)
-  vim.keymap.set("n", "<leader>dat", function()
+  vim.keymap.set("n", "<leader>daf", function()
     disasm_current_func()
   end, { remap = true, desc = "Disassemble current function" })
 
@@ -175,7 +175,7 @@ M.setup = function(cfg)
     end
   end, { remap = true, desc = "Clean disassembly and quit GDB" })
 
-  vim.keymap.set("n", "<leader>dal", function()
+  vim.keymap.set("n", "<leader>das", function()
     vim.api.nvim_buf_set_lines(0, 0, -1, false, LAST_DISASM_LINES)
   end, { remap = true, desc = "Set disassembly text to current buffer" })
 end

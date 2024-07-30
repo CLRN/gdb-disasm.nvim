@@ -45,7 +45,7 @@ local function start_gdb()
   job:start()
 
   local function communicate(command)
-    vim.print("writing '" .. command .. "'")
+    -- vim.print("writing '" .. command .. "'")
     job:send(command .. "\n")
 
     local lines = {}
@@ -81,8 +81,6 @@ local function disasm_current_func()
     end
 
     local path = cmake.get_launch_path(target) .. target
-
-    vim.print(string.format("comms: %s", COMMS))
 
     if not COMMS then
       COMMS = start_gdb()
@@ -161,7 +159,7 @@ M = {}
 M.setup = function(cfg)
   vim.keymap.set("n", "<leader>dat", function()
     disasm_current_func()
-  end, { remap = true })
+  end, { remap = true, desc = "Disassemble current function" })
 
   vim.keymap.set("n", "<leader>daq", function()
     vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
@@ -175,11 +173,11 @@ M.setup = function(cfg)
       COMMS = nil
       LAST_PATH = ""
     end
-  end, { remap = true })
+  end, { remap = true, desc = "Clean disassembly and quit GDB" })
 
   vim.keymap.set("n", "<leader>dal", function()
     vim.api.nvim_buf_set_lines(0, 0, -1, false, LAST_DISASM_LINES)
-  end, { remap = true })
+  end, { remap = true, desc = "Set disassembly text to current buffer" })
 end
 
 return M

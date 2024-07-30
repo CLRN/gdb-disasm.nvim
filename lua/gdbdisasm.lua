@@ -2,29 +2,10 @@ local Job = require 'plenary.job'
 local async = require "plenary.async"
 local ts_utils = require'nvim-treesitter.ts_utils'
 
-ns_id = vim.api.nvim_create_namespace "disnav"
-disasm_lines = {}
-disasm = {}
-comms = nil
-last_path = ""
-
-vim.keymap.set("n", "<leader>daq", function()
-  vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
-  if comms then
-    local c = comms
-
-    async.run(function()
-      c(string.format("quit"))
-    end)
-
-    comms = nil
-    last_path = ""
-  end
-end, { remap = true })
-
-vim.keymap.set("n", "<leader>dal", function()
-  vim.api.nvim_buf_set_lines(0, 0, -1, false, disasm_lines)
-end, { remap = true })
+local ns_id = vim.api.nvim_create_namespace "disnav"
+LAST_DISASM_LINES = {}
+COMMS = nil
+LAST_PATH = ""
 
 local function get_current_function_range()
   local current_node = ts_utils.get_node_at_cursor()
@@ -83,7 +64,7 @@ local function start_gdb()
   return communicate
 end
 
-vim.keymap.set("n", "<leader>dat", function()
+local function disasm_current_func()
   local cur_file = vim.fn.expand('%:p')
   local line_start, line_end = get_current_function_range()
 
@@ -101,37 +82,38 @@ vim.keymap.set("n", "<leader>dat", function()
 
     local path = cmake.get_launch_path(target) .. target
 
-    vim.print(string.format("comms: %s", comms))
+    vim.print(string.format("comms: %s", COMMS))
 
-    if not comms then
-      comms = start_gdb()
+    if not COMMS then
+      COMMS = start_gdb()
 
       -- set some settings
-      comms("set disassembly-flavor intel")
-      comms("set print asm-demangle")
+      COMMS("set disassembly-flavor intel")
+      COMMS("set print asm-demangle")
     end
 
     -- load file
-    if path ~= last_path then
-      last_path = path
-      comms(string.format("file %s", path))
+    if path ~= LAST_PATH then
+      LAST_PATH = path
+      COMMS(string.format("file %s", path))
     end
 
     -- fetch what's the function address for the given lines
-    local info = comms(string.format("info line %s:%s", cur_file, line_start))
+    local info = COMMS(string.format("info line %s:%s", cur_file, line_start))
     local func_addr = string.match(info[1], "0x[0-9a-h]+")
 
     -- disasm function address
-    local response = comms(string.format("disassemble %s", func_addr))
+    local response = COMMS(string.format("disassemble %s", func_addr))
 
-    disasm = {}
-    disasm_lines = {}
+    local disasm = {}
     local last_line = 1
+
+    LAST_DISASM_LINES = {}
 
     for _, str in ipairs(response) do
       local addr, asm = string.match(str, "^%s+(0x[0-9a-h]+)%s+<[^>]+>:([^\n]+)")
       if addr and asm then
-        local t = comms(string.format("list *%s", addr))
+        local t = COMMS(string.format("list *%s", addr))
         local raw = t[1]
         local last = #raw - raw:reverse():find(" ") + 1
         local s = raw:sub(last + 2, -4)
@@ -150,7 +132,7 @@ vim.keymap.set("n", "<leader>dat", function()
           disasm[last_line] = {}
         end
 
-        table.insert(disasm_lines, string.format("%-90s // %s:%s", asm, file, last_line))
+        table.insert(LAST_DISASM_LINES, string.format("%-90s // %s:%s", asm, file, last_line))
         table.insert(disasm[last_line], asm)
       end
     end
@@ -170,7 +152,34 @@ vim.keymap.set("n", "<leader>dat", function()
       end
     end)
 
-
   end)
-end, { remap = true })
+end
 
+
+M = {}
+
+M.setup = function(cfg)
+  vim.keymap.set("n", "<leader>dat", function()
+    disasm_current_func()
+  end, { remap = true })
+
+  vim.keymap.set("n", "<leader>daq", function()
+    vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
+    if COMMS then
+      local c = COMMS
+
+      async.run(function()
+        c(string.format("quit"))
+      end)
+
+      COMMS = nil
+      LAST_PATH = ""
+    end
+  end, { remap = true })
+
+  vim.keymap.set("n", "<leader>dal", function()
+    vim.api.nvim_buf_set_lines(0, 0, -1, false, LAST_DISASM_LINES)
+  end, { remap = true })
+end
+
+return M

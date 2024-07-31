@@ -49,7 +49,7 @@ local function start_gdb()
   job:start()
 
   local function communicate(command)
-    -- vim.print("writing '" .. command .. "'")
+    vim.print("writing '" .. command .. "'")
     job:send(command .. "\n")
 
     local lines = {}
@@ -68,38 +68,42 @@ local function start_gdb()
   return communicate
 end
 
+local function make_sure_gdb_is_running()
+  local status, cmake = pcall(require, "cmake-tools")
+  if not status then
+    vim.notify("unable to load cmake-tools", vim.log.levels.ERROR)
+    return
+  end
+  local target = cmake.get_launch_target()
+  if not target then
+    vim.notify("unable to load cmake target", vim.log.levels.ERROR)
+    return
+  end
+
+  local path = cmake.get_launch_path(target) .. target
+
+  if not COMMS then
+    COMMS = start_gdb()
+
+    -- set some settings
+    COMMS("set disassembly-flavor intel")
+    COMMS("set print asm-demangle")
+  end
+
+  -- load file
+  if path ~= LAST_PATH then
+    LAST_PATH = path
+    COMMS(string.format("file %s", path))
+  end
+end
+
 local function disasm_current_func()
   local cur_file = vim.fn.expand('%:p')
   local line_start, line_end = get_current_function_range()
   local cursor_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
 
   async.run(function()
-    local status, cmake = pcall(require, "cmake-tools")
-    if not status then
-      vim.notify("unable to load cmake-tools", vim.log.levels.ERROR)
-      return
-    end
-    local target = cmake.get_launch_target()
-    if not target then
-      vim.notify("unable to load cmake target", vim.log.levels.ERROR)
-      return
-    end
-
-    local path = cmake.get_launch_path(target) .. target
-
-    if not COMMS then
-      COMMS = start_gdb()
-
-      -- set some settings
-      COMMS("set disassembly-flavor intel")
-      COMMS("set print asm-demangle")
-    end
-
-    -- load file
-    if path ~= LAST_PATH then
-      LAST_PATH = path
-      COMMS(string.format("file %s", path))
-    end
+    make_sure_gdb_is_running()
 
     -- fetch what's the function address for the given lines
     local info = COMMS(string.format("info line %s:%s", cur_file, cursor_line))
@@ -161,6 +165,69 @@ local function disasm_current_func()
   end)
 end
 
+local function resolve_calls_under_the_cursor()
+  local cur_file = vim.fn.expand('%:p')
+  local cursor_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
+
+  async.run(function()
+    make_sure_gdb_is_running()
+
+    -- fetch what's the function address for the given lines
+    local info = COMMS(string.format("info line %s:%s", cur_file, cursor_line))
+
+    local match = string.gmatch(info[1], "0x[0-9a-h]+")
+    local addresses = {}
+    for i in match do
+      table.insert(addresses, i)
+    end
+
+    -- disasm function address
+    local response = COMMS(string.format("disassemble %s,%s", addresses[1], addresses[2]))
+    local names = {}
+    local jumps = {}
+    for _, str in ipairs(response) do
+      local _, asm = string.match(str, "^%s+(0x[0-9a-h]+)%s+<[^>]+>:([^\n]+)")
+      vim.print(asm)
+      if asm and asm:find("call ")  then
+        local addr, name = string.match(asm, "^[^0]+(0x[0-9a-h]+)%s+([^\n]+)")
+        if name then
+          table.insert(names, name)
+          table.insert(jumps, addr)
+        end
+      end
+    end
+
+    if #names == 0 then
+      return
+    end
+
+    local tx, rx = async.control.channel.oneshot()
+    local addr = nil
+
+    if #names == 1 then
+      addr = jumps[1]
+    else
+      vim.schedule(function ()
+        vim.ui.select(names, {
+          prompt = 'Pick function to jump to',
+        }, function(choice, idx)
+            tx(jumps[idx])
+          end)
+      end)
+
+      addr = rx()
+    end
+
+    info = COMMS(string.format("info line *%s", addr))
+    local line, file = string.match(info[1], "Line%s(%d+)[^\"]+[\"]([^\"]+)[\"]")
+
+    vim.schedule(function ()
+      vim.cmd(string.format(":edit %s", file))
+      vim.cmd(string.format(":%d", line))
+    end)
+  end)
+end
+
 
 M = {}
 
@@ -186,6 +253,10 @@ M.setup = function(cfg)
   vim.keymap.set("n", "<leader>das", function()
     vim.api.nvim_buf_set_lines(0, 0, -1, false, LAST_DISASM_LINES)
   end, { remap = true, desc = "Set disassembly text to current buffer" })
+
+  vim.keymap.set("n", "<leader>dac", function()
+    resolve_calls_under_the_cursor()
+  end, { remap = true, desc = "Jump to a call" })
 end
 
 return M

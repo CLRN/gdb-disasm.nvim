@@ -11,6 +11,67 @@ local root_path = vim.fn.stdpath("data") .. "/gdb-disasm"
 local sessions_path = root_path .. "/sessions/"
 local is_auto_reload_enabled = false
 
+local function parse_asm(src)
+	local tree = vim.treesitter.languagetree.new(src, "asm")
+	local root = tree:parse(true)[1]:root()
+
+	local asm_lines = {}
+
+	local visit = function(v, obj, lvl)
+		if not obj or lvl > 2 then
+			return
+		end
+
+		if lvl == 2 then
+			local text = vim.treesitter.get_node_text(obj, src)
+			table.insert(asm_lines, { obj:type(), text })
+			-- vim.print(lvl .. " lvl, type: " .. obj:type() .. ": " .. text)
+		end
+
+		for child, _ in obj:iter_children() do
+			v(v, child, lvl + 1)
+		end
+	end
+
+	visit(visit, root, 0)
+	return asm_lines
+end
+
+local function create_asm_highlights(asm_lines)
+	local hl_map = {
+		["word"] = "@function.builtin.asm",
+		["ptr"] = "@variable.builtin.asm",
+		["int"] = "@number.asm",
+		["ERROR"] = "@variable.builtin.asm",
+		[","] = "",
+		["tc_infix"] = "@variable.builtin.asm",
+	}
+
+	local res = {}
+	local last_type = ""
+	for idx, data in ipairs(asm_lines) do
+		if data[2] == ">" or data[2] == "<" or data[2] == "(" or data[2] == ")" then
+			data[1] = "," -- treat as punctuation
+		end
+		if data[2] == "PTR" then
+			data[1] = "@variable.builtin.asm" -- treat as builtin
+		end
+
+		local pattern = "%s"
+		if idx == 1 then
+			pattern = "\t\t%-10s"
+		elseif last_type ~= "," and data[1] ~= "," then
+			pattern = " %s"
+		end
+
+		-- vim.print("type: " .. data[1] .. ", text: " .. data[2])
+		table.insert(res, { string.format(pattern, data[2]), { "", hl_map[data[1]] or "@variable.builtin.asm" } })
+		last_type = data[1]
+	end
+
+	return res
+end
+
 local function get_ts_current_node()
 	local current_node = ts_utils.get_node_at_cursor()
 	local expr = current_node
@@ -127,26 +188,12 @@ end
 local function draw_disasm_lines(buf_id, lines)
 	vim.schedule(function()
 		vim.api.nvim_buf_clear_namespace(buf_id, ns_id, 0, -1)
-		vim.api.nvim_set_hl(buf_id, "disasm-instruction", { fg = "#a6e3a1" })
-		vim.api.nvim_set_hl(buf_id, "disasm-default", {})
 
 		for line_num, text in pairs(lines) do
 			local virt_lines = {}
 			for _, line in ipairs(text) do
-				local to_render = {}
-				table.insert(to_render, { "    ", { "Comment", "disasm-default" } })
-
-				for idx, part in ipairs(vim.split(line, " ")) do
-					if #part > 1 then
-						local style = idx == 1 and "disasm-instruction" or "disasm-default"
-						local pattern = idx == 1 and "%-10s" or "%s "
-
-						table.insert(to_render, { string.format(pattern, part), { "Comment", style } })
-					end
-				end
-
-				-- vim.print(string.format("line num: %s, line text: %s", line_num, line))
-				table.insert(virt_lines, to_render)
+				local parsed = parse_asm(line)
+				table.insert(virt_lines, create_asm_highlights(parsed))
 			end
 
 			local col_num = 0
@@ -404,6 +451,12 @@ M.setup = function(cfg)
 		is_auto_reload_enabled = not is_auto_reload_enabled
 		vim.notify(string.format("Auto reload is %s", is_auto_reload_enabled and "ON" or "OFF"), vim.log.levels.INFO)
 	end, { remap = true, desc = "Toggle auto reload on build" })
+
+	vim.keymap.set("n", "<leader>dat", function()
+		local src = "cmp    DWORD PTR [rbp-0x8],0x3e8"
+		local parsed = parse_asm(src)
+		create_asm_highlights(parsed)
+	end, { remap = true, desc = "Test call" })
 end
 
 M.on_build_completed = function()

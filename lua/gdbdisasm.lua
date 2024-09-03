@@ -6,7 +6,6 @@ local ns_id = vim.api.nvim_create_namespace("disnav")
 local last_disasm_lines = {}
 local comms = nil
 local last_path = ""
-local last_notification = nil
 
 local function get_current_function_range()
 	local current_node = ts_utils.get_node_at_cursor()
@@ -123,7 +122,9 @@ local function draw_disasm_lines(buf_id, lines)
 	end)
 end
 
-local function disasm_current_func()
+---Disassembles current function and calls provided callback with a table containing line nums and text
+---@param callback function
+local function disasm_current_func(callback)
 	local cur_file = vim.fn.expand("%:p")
 	local line_start, line_end = get_current_function_range()
 	---@diagnostic disable-next-line: deprecated
@@ -174,7 +175,7 @@ local function disasm_current_func()
 			end
 		end
 
-		draw_disasm_lines(0, disasm)
+    callback(disasm)
 	end)
 end
 
@@ -246,7 +247,9 @@ M = {}
 
 M.setup = function(cfg)
 	vim.keymap.set("n", "<leader>daf", function()
-		disasm_current_func()
+		disasm_current_func(function(disasm)
+			draw_disasm_lines(0, disasm)
+		end)
 	end, { remap = true, desc = "Disassemble current function" })
 
 	vim.keymap.set("n", "<leader>daq", function()

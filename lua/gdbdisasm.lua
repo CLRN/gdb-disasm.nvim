@@ -6,6 +6,7 @@ local ns_id = vim.api.nvim_create_namespace("disnav")
 local last_disasm_lines = {}
 local comms = nil
 local last_path = ""
+local root_path = vim.fn.stdpath("data") .. "/gdb-disasm"
 
 local function get_current_function_range()
 	local current_node = ts_utils.get_node_at_cursor()
@@ -49,6 +50,8 @@ local function start_gdb()
 	})
 
 	job:start()
+
+	vim.notify(string.format("GDB started"), vim.log.levels.INFO)
 
 	local function communicate(command)
 		-- vim.print("writing '" .. command .. "'")
@@ -96,6 +99,7 @@ local function make_sure_gdb_is_running()
 	if path ~= last_path then
 		last_path = path
 		comms(string.format("file %s", path))
+		vim.notify(string.format("Disassembly completed"), vim.log.levels.INFO)
 	end
 end
 
@@ -175,7 +179,7 @@ local function disasm_current_func(callback)
 			end
 		end
 
-    callback(disasm)
+		callback(disasm)
 	end)
 end
 
@@ -252,6 +256,33 @@ M.setup = function(cfg)
 		end)
 	end, { remap = true, desc = "Disassemble current function" })
 
+	vim.keymap.set("n", "<leader>das", function()
+		vim.ui.input({ prompt = "Enter name for the saved session: " }, function(input)
+      if not input then
+        return
+      end
+
+			local src = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+			local sessions_path = root_path .. "/sessions/"
+
+			vim.fn.mkdir(sessions_path, "p")
+
+			local file_path = sessions_path .. input
+
+			disasm_current_func(function(disasm)
+				local data = { src = src, disasm = {} }
+				for line_num, text in pairs(disasm) do
+					table.insert(data.disasm, { line_num = line_num, disasm = text })
+				end
+
+				vim.schedule(function()
+					vim.fn.writefile({ vim.json.encode(data) }, file_path)
+					vim.notify(string.format("Saved session to %s", file_path), vim.log.levels.INFO)
+				end)
+			end)
+		end)
+	end, { remap = true, desc = "Disassemble current function and save to history" })
+
 	vim.keymap.set("n", "<leader>daq", function()
 		vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
 		if comms then
@@ -266,9 +297,9 @@ M.setup = function(cfg)
 		end
 	end, { remap = true, desc = "Clean disassembly and quit GDB" })
 
-	vim.keymap.set("n", "<leader>das", function()
+	vim.keymap.set("n", "<leader>dad", function()
 		vim.api.nvim_buf_set_lines(0, 0, -1, false, last_disasm_lines)
-	end, { remap = true, desc = "Set disassembly text to current buffer" })
+	end, { remap = true, desc = "Set disassembly text to current buffer for debugging" })
 
 	vim.keymap.set("n", "<leader>dac", function()
 		resolve_calls_under_the_cursor()

@@ -37,20 +37,27 @@ local function parse_asm(src)
 	return asm_lines
 end
 
-local function create_asm_highlights(asm_lines)
+local function create_asm_with_highlights(asm_lines)
 	local hl_map = {
 		["word"] = "@function.builtin.asm",
 		["ptr"] = "@variable.builtin.asm",
 		["int"] = "@number.asm",
 		["ERROR"] = "@variable.builtin.asm",
-		[","] = "",
+		[","] = "@operator.asm",
 		["tc_infix"] = "@variable.builtin.asm",
 	}
 
 	local res = {}
 	local last_type = ""
 	for idx, data in ipairs(asm_lines) do
-		if data[2] == ">" or data[2] == "<" or data[2] == "(" or data[2] == ")" then
+		if
+			data[2] == ">"
+			or data[2] == "<"
+			or data[2] == "("
+			or data[2] == ")"
+			or data[2] == "::"
+			or data[2] == "~"
+		then
 			data[1] = "," -- treat as punctuation
 		end
 		if data[2] == "PTR" then
@@ -64,8 +71,9 @@ local function create_asm_highlights(asm_lines)
 			pattern = " %s"
 		end
 
-		-- vim.print("type: " .. data[1] .. ", text: " .. data[2])
-		table.insert(res, { string.format(pattern, data[2]), { "", hl_map[data[1]] or "@variable.builtin.asm" } })
+		local hl = hl_map[data[1]] or "@variable.builtin.asm"
+		vim.print("type: " .. data[1] .. ", text: " .. data[2] .. ", hl: " .. hl)
+		table.insert(res, { string.format(pattern, data[2]), { "Comment", hl } })
 		last_type = data[1]
 	end
 
@@ -193,7 +201,7 @@ local function draw_disasm_lines(buf_id, lines)
 			local virt_lines = {}
 			for _, line in ipairs(text) do
 				local parsed = parse_asm(line)
-				table.insert(virt_lines, create_asm_highlights(parsed))
+				table.insert(virt_lines, create_asm_with_highlights(parsed))
 			end
 
 			local col_num = 0
@@ -453,9 +461,9 @@ M.setup = function(cfg)
 	end, { remap = true, desc = "Toggle auto reload on build" })
 
 	vim.keymap.set("n", "<leader>dat", function()
-		local src = "cmp    DWORD PTR [rbp-0x8],0x3e8"
+		local src = "call   0x303d0 <boost::cobalt::detail::task_promise<int>::~task_promise()>"
 		local parsed = parse_asm(src)
-		create_asm_highlights(parsed)
+		create_asm_with_highlights(parsed)
 	end, { remap = true, desc = "Test call" })
 end
 

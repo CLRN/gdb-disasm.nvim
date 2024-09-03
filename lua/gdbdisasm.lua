@@ -7,6 +7,7 @@ local last_disasm_lines = {}
 local comms = nil
 local last_path = ""
 local root_path = vim.fn.stdpath("data") .. "/gdb-disasm"
+local sessions_path = root_path .. "/sessions/"
 
 local function get_current_function_range()
 	local current_node = ts_utils.get_node_at_cursor()
@@ -258,19 +259,16 @@ M.setup = function(cfg)
 
 	vim.keymap.set("n", "<leader>das", function()
 		vim.ui.input({ prompt = "Enter name for the saved session: " }, function(input)
-      if not input then
-        return
-      end
+			if not input then
+				return
+			end
 
-			local src = vim.api.nvim_buf_get_lines(0, 0, -1, false)
-			local sessions_path = root_path .. "/sessions/"
+			local file_path = sessions_path .. input
+			local data = { src = vim.api.nvim_buf_get_lines(0, 0, -1, false), disasm = {}, ft = vim.bo.ft }
 
 			vim.fn.mkdir(sessions_path, "p")
 
-			local file_path = sessions_path .. input
-
 			disasm_current_func(function(disasm)
-				local data = { src = src, disasm = {} }
 				for line_num, text in pairs(disasm) do
 					table.insert(data.disasm, { line_num = line_num, disasm = text })
 				end
@@ -282,6 +280,31 @@ M.setup = function(cfg)
 			end)
 		end)
 	end, { remap = true, desc = "Disassemble current function and save to history" })
+
+	vim.keymap.set("n", "<leader>dal", function()
+		vim.fn.mkdir(sessions_path, "p")
+
+		local files = vim.split(vim.fn.glob(sessions_path .. "*"), "\n", { trimempty = true })
+
+		vim.ui.select(files, {
+			prompt = "Pick session to load",
+			format_item = function(item)
+				return item:sub(#sessions_path + 1)
+			end,
+		}, function(choice, idx)
+			local content = vim.fn.readfile(files[idx])
+			local data = vim.json.decode(content[1])
+
+			local disasm = {}
+			for _, obj in pairs(data.disasm) do
+				disasm[obj.line_num] = obj.disasm
+			end
+
+			vim.bo.ft = data.ft
+			vim.api.nvim_buf_set_lines(0, 0, -1, false, data.src)
+			draw_disasm_lines(0, disasm)
+		end)
+	end, { remap = true, desc = "Load saved session to the current buffer" })
 
 	vim.keymap.set("n", "<leader>daq", function()
 		vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)

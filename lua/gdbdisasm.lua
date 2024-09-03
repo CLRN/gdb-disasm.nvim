@@ -292,6 +292,10 @@ M.setup = function(cfg)
 				return item:sub(#sessions_path + 1)
 			end,
 		}, function(choice, idx)
+			if not files[idx] then
+				return
+			end
+
 			local content = vim.fn.readfile(files[idx])
 			local data = vim.json.decode(content[1])
 
@@ -305,6 +309,21 @@ M.setup = function(cfg)
 			draw_disasm_lines(0, disasm)
 		end)
 	end, { remap = true, desc = "Load saved session to the current buffer" })
+
+	vim.keymap.set("n", "<leader>dar", function()
+		vim.fn.mkdir(sessions_path, "p")
+
+		local files = vim.split(vim.fn.glob(sessions_path .. "*"), "\n", { trimempty = true })
+
+		vim.ui.select(files, {
+			prompt = "Pick session to remove",
+			format_item = function(item)
+				return item:sub(#sessions_path + 1)
+			end,
+		}, function(choice, idx)
+			os.remove(files[idx])
+		end)
+	end, { remap = true, desc = "Remove saved session" })
 
 	vim.keymap.set("n", "<leader>daq", function()
 		vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)

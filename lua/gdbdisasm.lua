@@ -127,12 +127,26 @@ end
 local function draw_disasm_lines(buf_id, lines)
 	vim.schedule(function()
 		vim.api.nvim_buf_clear_namespace(buf_id, ns_id, 0, -1)
+		vim.api.nvim_set_hl(buf_id, "disasm-instruction", { fg = "#a6e3a1" })
+		vim.api.nvim_set_hl(buf_id, "disasm-default", {})
 
 		for line_num, text in pairs(lines) do
 			local virt_lines = {}
 			for _, line in ipairs(text) do
+				local to_render = {}
+				table.insert(to_render, { "    ", { "Comment", "disasm-default" } })
+
+				for idx, part in ipairs(vim.split(line, " ")) do
+					if #part > 1 then
+						local style = idx == 1 and "disasm-instruction" or "disasm-default"
+						local pattern = idx == 1 and "%-10s" or "%s "
+
+						table.insert(to_render, { string.format(pattern, part), { "Comment", style } })
+					end
+				end
+
 				-- vim.print(string.format("line num: %s, line text: %s", line_num, line))
-				table.insert(virt_lines, { { "    " .. line, "Comment" } })
+				table.insert(virt_lines, to_render)
 			end
 
 			local col_num = 0

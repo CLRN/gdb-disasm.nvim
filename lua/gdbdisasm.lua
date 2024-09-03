@@ -274,11 +274,14 @@ local function resolve_calls_under_the_cursor()
 
 		info = comms(string.format("info line *%s", addr))
 		local line, file = string.match(info[1], 'Line%s(%d+)[^"]+["]([^"]+)["]')
-
-		vim.schedule(function()
-			vim.cmd(string.format(":edit %s", file))
-			vim.cmd(string.format(":%d", line))
-		end)
+		if line ~= nil and file ~= nil then
+			vim.schedule(function()
+				vim.cmd(string.format(":edit %s", file))
+				vim.cmd(string.format(":%d", line))
+			end)
+		else
+			vim.notify(string.format("Unable to resolve address %s", addr), vim.log.levels.WARN)
+		end
 	end)
 end
 

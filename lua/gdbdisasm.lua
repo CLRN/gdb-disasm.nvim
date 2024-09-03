@@ -11,7 +11,7 @@ local root_path = vim.fn.stdpath("data") .. "/gdb-disasm"
 local sessions_path = root_path .. "/sessions/"
 local is_auto_reload_enabled = false
 
-local function get_current_function_range()
+local function get_ts_current_node()
 	local current_node = ts_utils.get_node_at_cursor()
 	local expr = current_node
 
@@ -21,12 +21,22 @@ local function get_current_function_range()
 		end
 		expr = expr:parent()
 	end
+	return expr
+end
 
+local function get_current_function_range()
+	local expr = get_ts_current_node()
 	if not expr then
 		return 0, 0
 	end
+
 	local range = vim.treesitter.get_range(expr)
 	return range[1], range[4]
+end
+
+local function get_current_function_name()
+	local expr = get_ts_current_node()
+	return ts_utils.get_node_text(expr:child(1))[1]
 end
 
 local function start_gdb()
@@ -187,6 +197,8 @@ end
 local function disasm_current_func(callback)
 	local file_path = vim.fn.expand("%:p")
 	local line_start, line_end = get_current_function_range()
+	local func_name = get_current_function_name()
+
 	---@diagnostic disable-next-line: deprecated
 	local file_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
 	local cur_file = vim.fn.expand("%:p")
@@ -197,6 +209,7 @@ local function disasm_current_func(callback)
 		line_start = line_start,
 		line_end = line_end,
 		cur_file = cur_file,
+		func_name = func_name,
 	}
 
 	async.run(function()
@@ -378,11 +391,17 @@ end
 
 M.on_build_completed = function()
 	if is_auto_reload_enabled then
+		local func_name = get_current_function_name()
 		async.run(function()
 			make_sure_gdb_is_up_to_date(true)
-			vim.schedule(function()
-				resolve_calls_under_the_cursor()
-			end)
+
+			if last_disasm_target and func_name == last_disasm_target.func_name then
+				vim.schedule(function()
+					disasm_current_func(function(disasm)
+						draw_disasm_lines(0, disasm)
+					end)
+				end)
+			end
 		end)
 	end
 end

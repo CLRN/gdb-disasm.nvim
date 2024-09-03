@@ -321,7 +321,9 @@ M.setup = function(cfg)
 				return item:sub(#sessions_path + 1)
 			end,
 		}, function(choice, idx)
-			os.remove(files[idx])
+			if files[idx] then
+				os.remove(files[idx])
+			end
 		end)
 	end, { remap = true, desc = "Remove saved session" })
 

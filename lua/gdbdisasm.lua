@@ -4,10 +4,12 @@ local ts_utils = require("nvim-treesitter.ts_utils")
 
 local ns_id = vim.api.nvim_create_namespace("disnav")
 local last_disasm_lines = {}
+local last_binary_path = ""
 local comms = nil
-local last_path = ""
+local last_disasm_target = nil
 local root_path = vim.fn.stdpath("data") .. "/gdb-disasm"
 local sessions_path = root_path .. "/sessions/"
+local is_auto_reload_enabled = false
 
 local function get_current_function_range()
 	local current_node = ts_utils.get_node_at_cursor()
@@ -61,6 +63,9 @@ local function start_gdb()
 		local lines = {}
 		while true do
 			local line = getter.recv()
+
+			-- vim.print("reading '" .. line .. "'")
+
 			if string.sub(line, 1, 1) == "^" then
 				return lines
 			end
@@ -74,7 +79,9 @@ local function start_gdb()
 	return communicate
 end
 
-local function make_sure_gdb_is_running()
+---Starts GDB if not running, loads symbol if the path changed or forced
+---@param force boolean
+local function make_sure_gdb_is_up_to_date(force)
 	local status, cmake = pcall(require, "cmake-tools")
 	if not status then
 		vim.notify("unable to load cmake-tools", vim.log.levels.ERROR)
@@ -97,8 +104,8 @@ local function make_sure_gdb_is_running()
 	end
 
 	-- load file
-	if path ~= last_path then
-		last_path = path
+	if path ~= last_binary_path or force then
+		last_binary_path = path
 		comms(string.format("file %s", path))
 		vim.notify(string.format("Disassembly completed"), vim.log.levels.INFO)
 	end
@@ -127,60 +134,74 @@ local function draw_disasm_lines(buf_id, lines)
 	end)
 end
 
+local function disassemble_function(opts)
+	-- fetch what's the function address for the given lines
+	local info = comms(string.format("info line %s:%s", opts.file_path, opts.file_line))
+	local func_addr = string.match(info[1], "0x[0-9a-h]+")
+
+	-- disasm function address
+	local response = comms(string.format("disassemble %s", func_addr))
+
+	local disasm = {}
+	local last_line = 1
+
+	last_disasm_lines = {}
+
+	for _, str in ipairs(response) do
+		local addr, asm = string.match(str, "^%s+(0x[0-9a-h]+)%s+<[^>]+>:([^\n]+)")
+		if addr and asm then
+			local t = comms(string.format("list *%s", addr))
+			local raw = t[1]
+
+			local last = #raw - raw:reverse():find(" ") + 1
+			local s = raw:sub(last + 2, -4)
+			local delim = s:find(":")
+
+			local file = s:sub(1, delim - 1)
+			local line = tonumber(s:sub(delim + 1))
+			if line and opts.cur_file == file then
+				last_line = line
+			else
+				asm = string.format("%-90s // %s:%s", asm, file, line)
+				-- vim.print(string.format("unmatched file %s against %s", t[1], cur_file))
+			end
+
+			if not disasm[last_line] then
+				disasm[last_line] = {}
+			end
+
+			table.insert(last_disasm_lines, string.format("%-90s // %s:%s", asm, file, last_line))
+
+			if last_line <= opts.line_end + 1 and last_line >= opts.line_start then
+				table.insert(disasm[last_line], asm)
+				-- vim.print(asm)
+			end
+		end
+	end
+
+	return disasm
+end
+
 ---Disassembles current function and calls provided callback with a table containing line nums and text
 ---@param callback function
 local function disasm_current_func(callback)
-	local cur_file = vim.fn.expand("%:p")
+	local file_path = vim.fn.expand("%:p")
 	local line_start, line_end = get_current_function_range()
 	---@diagnostic disable-next-line: deprecated
-	local cursor_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
+	local file_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
+	local cur_file = vim.fn.expand("%:p")
+
+	last_disasm_target = {
+		file_path = file_path,
+		file_line = file_line,
+		line_start = line_start,
+		line_end = line_end,
+		cur_file = cur_file,
+	}
 
 	async.run(function()
-		make_sure_gdb_is_running()
-
-		-- fetch what's the function address for the given lines
-		local info = comms(string.format("info line %s:%s", cur_file, cursor_line))
-		local func_addr = string.match(info[1], "0x[0-9a-h]+")
-
-		-- disasm function address
-		local response = comms(string.format("disassemble %s", func_addr))
-
-		local disasm = {}
-		local last_line = 1
-
-		last_disasm_lines = {}
-
-		for _, str in ipairs(response) do
-			local addr, asm = string.match(str, "^%s+(0x[0-9a-h]+)%s+<[^>]+>:([^\n]+)")
-			if addr and asm then
-				local t = comms(string.format("list *%s", addr))
-				local raw = t[1]
-				local last = #raw - raw:reverse():find(" ") + 1
-				local s = raw:sub(last + 2, -4)
-				local delim = s:find(":")
-
-				local file = s:sub(1, delim - 1)
-				local line = tonumber(s:sub(delim + 1))
-				if line and cur_file == file then
-					last_line = line
-				else
-					asm = string.format("%-90s // %s:%s", asm, file, line)
-					-- vim.print(string.format("unmatched file %s against %s", t[1], cur_file))
-				end
-
-				if not disasm[last_line] then
-					disasm[last_line] = {}
-				end
-
-				table.insert(last_disasm_lines, string.format("%-90s // %s:%s", asm, file, last_line))
-
-				if last_line <= line_end + 1 and last_line >= line_start then
-					table.insert(disasm[last_line], asm)
-				end
-			end
-		end
-
-		callback(disasm)
+		make_sure_gdb_is_up_to_date(false)
+		callback(disassemble_function(last_disasm_target))
 	end)
 end
 
@@ -190,7 +211,7 @@ local function resolve_calls_under_the_cursor()
 	local cursor_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
 
 	async.run(function()
-		make_sure_gdb_is_running()
+		make_sure_gdb_is_up_to_date(false)
 
 		-- fetch what's the function address for the given lines
 		local info = comms(string.format("info line %s:%s", cur_file, cursor_line))
@@ -337,7 +358,7 @@ M.setup = function(cfg)
 			end)
 
 			comms = nil
-			last_path = ""
+			last_binary_path = ""
 		end
 	end, { remap = true, desc = "Clean disassembly and quit GDB" })
 
@@ -348,6 +369,22 @@ M.setup = function(cfg)
 	vim.keymap.set("n", "<leader>dac", function()
 		resolve_calls_under_the_cursor()
 	end, { remap = true, desc = "Jump to a call" })
+
+	vim.keymap.set("n", "<leader>dab", function()
+		is_auto_reload_enabled = not is_auto_reload_enabled
+		vim.notify(string.format("Auto reload is %s", is_auto_reload_enabled and "ON" or "OFF"), vim.log.levels.INFO)
+	end, { remap = true, desc = "Toggle auto reload on build" })
+end
+
+M.on_build_completed = function()
+	if is_auto_reload_enabled then
+		async.run(function()
+			make_sure_gdb_is_up_to_date(true)
+			vim.schedule(function()
+				resolve_calls_under_the_cursor()
+			end)
+		end)
+	end
 end
 
 return M

@@ -140,7 +140,7 @@ local function draw_disasm_lines(buf_id, lines)
 				virt_lines = virt_lines,
 			})
 		end
-		vim.notify(string.format("Disasm text is drawn"), vim.log.levels.INFO)
+		vim.notify(string.format("Disasm text is updated"), vim.log.levels.INFO)
 	end)
 end
 

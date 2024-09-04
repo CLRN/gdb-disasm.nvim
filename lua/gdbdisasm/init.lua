@@ -1,6 +1,7 @@
 local Job = require("plenary.job")
 local async = require("plenary.async")
 local ts_utils = require("nvim-treesitter.ts_utils")
+local log = require("gdbdisasm.log")
 
 local ns_id = vim.api.nvim_create_namespace("disnav")
 local last_disasm_lines = {}
@@ -25,7 +26,7 @@ local function parse_asm(src)
 		if lvl == 2 then
 			local text = vim.treesitter.get_node_text(obj, src)
 			table.insert(asm_lines, { obj:type(), text })
-			-- vim.print(lvl .. " lvl, type: " .. obj:type() .. ": " .. text)
+			log.fmt_trace("lvl %s, type: %s, text: %s", lvl, obj:type(), text or "null")
 		end
 
 		for child, _ in obj:iter_children() do
@@ -72,7 +73,7 @@ local function create_asm_with_highlights(asm_lines)
 		end
 
 		local hl = hl_map[data[1]] or "@variable.builtin.asm"
-		vim.print("type: " .. data[1] .. ", text: " .. data[2] .. ", hl: " .. hl)
+		log.fmt_trace("type %s, text: %s, hl: %s", data[1], data[2], hl)
 		table.insert(res, { string.format(pattern, data[2]), { "Comment", hl } })
 		last_type = data[1]
 	end
@@ -136,14 +137,14 @@ local function start_gdb()
 	vim.notify(string.format("GDB started"), vim.log.levels.INFO)
 
 	local function communicate(command)
-		-- vim.print("writing '" .. command .. "'")
+		log.trace("writing '" .. command .. "'")
 		job:send(command .. "\n")
 
 		local lines = {}
 		while true do
 			local line = getter.recv()
 
-			-- vim.print("reading '" .. line .. "'")
+			log.trace("reading '" .. line .. "'")
 
 			if string.sub(line, 1, 1) == "^" then
 				return lines
@@ -242,7 +243,7 @@ local function disassemble_function(opts)
 				last_line = line
 			else
 				asm = string.format("%-90s // %s:%s", asm, file, line)
-				-- vim.print(string.format("unmatched file %s against %s", t[1], cur_file))
+				log.fmt_warn("unmatched file %s against %s", t[1], file)
 			end
 
 			if not disasm[last_line] then
@@ -253,7 +254,6 @@ local function disassemble_function(opts)
 
 			if last_line <= opts.line_end + 1 and last_line >= opts.line_start then
 				table.insert(disasm[last_line], asm)
-				-- vim.print(asm)
 			end
 		end
 	end
@@ -310,7 +310,6 @@ local function resolve_calls_under_the_cursor()
 		local jumps = {}
 		for _, str in ipairs(response) do
 			local _, asm = string.match(str, "^%s+(0x[0-9a-h]+)%s+<[^>]+>:([^\n]+)")
-			-- vim.print(asm)
 			if asm and asm:find("call ") then
 				local addr, name = string.match(asm, "^[^0]+(0x[0-9a-h]+)%s+([^\n]+)")
 				if name then

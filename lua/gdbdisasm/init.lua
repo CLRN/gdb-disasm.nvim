@@ -136,22 +136,29 @@ local function start_gdb()
 
 	vim.notify(string.format("GDB started"), vim.log.levels.INFO)
 
-	local function communicate(command)
-		log.trace("writing '" .. command .. "'")
-		job:send(command .. "\n")
-
+	local function communicate(commands)
+		log.trace("writing '" .. table.concat(commands, ",") .. "'")
 		local lines = {}
+		for _, cmd in ipairs(commands) do
+			job:send(cmd .. "\n")
+			table.insert(lines, {})
+		end
+
+		local count = 0
 		while true do
 			local line = getter.recv()
 
 			log.trace("reading '" .. line .. "'")
 
 			if string.sub(line, 1, 1) == "^" then
-				return lines
+				count = count + 1
+				if count == #commands then
+					return lines
+				end
 			end
 
 			if string.sub(line, 1, 1) == "~" then
-				table.insert(lines, vim.json.decode(string.sub(line, 2)))
+				table.insert(lines[count + 1], vim.json.decode(string.sub(line, 2)))
 			end
 		end
 	end
@@ -179,14 +186,13 @@ local function make_sure_gdb_is_up_to_date(force)
 		comms = start_gdb()
 
 		-- set some settings
-		comms("set disassembly-flavor intel")
-		comms("set print asm-demangle")
+		comms({ "set disassembly-flavor intel", "set print asm-demangle" })
 	end
 
 	-- load file
 	if path ~= last_binary_path or force then
 		last_binary_path = path
-		comms(string.format("file %s", path))
+		comms({ string.format("file %s", path) })
 		vim.notify(string.format("Disassembly completed"), vim.log.levels.INFO)
 	end
 end
@@ -215,46 +221,62 @@ local function draw_disasm_lines(buf_id, lines)
 end
 
 local function disassemble_function(opts)
+	if not comms then
+		return
+	end
+
 	-- fetch what's the function address for the given lines
-	local info = comms(string.format("info line %s:%s", opts.file_path, opts.file_line))
+	local info = comms({ string.format("info line %s:%s", opts.file_path, opts.file_line) })[1]
 	local func_addr = string.match(info[1], "0x[0-9a-h]+")
 
-	-- disasm function address
-	local response = comms(string.format("disassemble %s", func_addr))
+	-- disasm function address to asm listing
+	local func_disasm_response = comms({ string.format("disassemble %s", func_addr) })[1]
+
+	local commands = {}
+	local parsed_asm = {}
+
+	-- extract asm text and prepare source listing commands for each asm address
+	for _, str in ipairs(func_disasm_response) do
+		local addr, asm = string.match(str, "^%s+(0x[0-9a-h]+)%s+<[^>]+>:([^\n]+)")
+		if addr and asm then
+			table.insert(commands, string.format("list *%s", addr))
+			table.insert(parsed_asm, asm)
+		end
+	end
+
+	local address_disasm_response = comms(commands)
 
 	local disasm = {}
 	local last_line = 1
 
 	last_disasm_lines = {}
 
-	for _, str in ipairs(response) do
-		local addr, asm = string.match(str, "^%s+(0x[0-9a-h]+)%s+<[^>]+>:([^\n]+)")
-		if addr and asm then
-			local t = comms(string.format("list *%s", addr))
-			local raw = t[1]
+	-- for each command response parse source code location
+	for addr_idx, command_response in ipairs(address_disasm_response) do
+		local raw = command_response[1]
+		local asm = parsed_asm[addr_idx]
 
-			local last = #raw - raw:reverse():find(" ") + 1
-			local s = raw:sub(last + 2, -4)
-			local delim = s:find(":")
+		local last = #raw - raw:reverse():find(" ") + 1
+		local s = raw:sub(last + 2, -4)
+		local delim = s:find(":")
 
-			local file = s:sub(1, delim - 1)
-			local line = tonumber(s:sub(delim + 1))
-			if line and opts.cur_file == file then
-				last_line = line
-			else
-				asm = string.format("%-90s // %s:%s", asm, file, line)
-				log.fmt_warn("unmatched file %s against %s", t[1], file)
-			end
+		local file = s:sub(1, delim - 1)
+		local line = tonumber(s:sub(delim + 1))
+		if line and opts.cur_file == file then
+			last_line = line
+		else
+			asm = string.format("%-90s // %s:%s", asm, file, line)
+			log.fmt_warn("unmatched file %s against %s", raw, file)
+		end
 
-			if not disasm[last_line] then
-				disasm[last_line] = {}
-			end
+		if not disasm[last_line] then
+			disasm[last_line] = {}
+		end
 
-			table.insert(last_disasm_lines, string.format("%-90s // %s:%s", asm, file, last_line))
+		table.insert(last_disasm_lines, string.format("%-90s // %s:%s", asm, file, last_line))
 
-			if last_line <= opts.line_end + 1 and last_line >= opts.line_start then
-				table.insert(disasm[last_line], asm)
-			end
+		if last_line <= opts.line_end + 1 and last_line >= opts.line_start then
+			table.insert(disasm[last_line], asm)
 		end
 	end
 
@@ -296,7 +318,7 @@ local function resolve_calls_under_the_cursor()
 		make_sure_gdb_is_up_to_date(false)
 
 		-- fetch what's the function address for the given lines
-		local info = comms(string.format("info line %s:%s", cur_file, cursor_line))
+		local info = comms({ string.format("info line %s:%s", cur_file, cursor_line) })[1]
 
 		local match = string.gmatch(info[1], "0x[0-9a-h]+")
 		local addresses = {}
@@ -305,7 +327,7 @@ local function resolve_calls_under_the_cursor()
 		end
 
 		-- disasm function address
-		local response = comms(string.format("disassemble %s,%s", addresses[1], addresses[2]))
+		local response = comms({ string.format("disassemble %s,%s", addresses[1], addresses[2]) })[1]
 		local names = {}
 		local jumps = {}
 		for _, str in ipairs(response) do
@@ -342,7 +364,7 @@ local function resolve_calls_under_the_cursor()
 			addr = rx()
 		end
 
-		info = comms(string.format("info line *%s", addr))
+		info = comms({ string.format("info line *%s", addr) })[1]
 		local line, file = string.match(info[1], 'Line%s(%d+)[^"]+["]([^"]+)["]')
 
 		if line ~= nil and file ~= nil then
@@ -450,7 +472,7 @@ M.setup = function(cfg)
 			local c = comms
 
 			async.run(function()
-				c(string.format("quit"))
+				c({ string.format("quit") })
 			end)
 
 			comms = nil
@@ -460,6 +482,7 @@ M.setup = function(cfg)
 
 	vim.keymap.set("n", "<leader>dad", function()
 		vim.api.nvim_buf_set_lines(0, 0, -1, false, last_disasm_lines)
+    vim.bo.ft = "asm"
 	end, { remap = true, desc = "Set disassembly text to current buffer for debugging" })
 
 	vim.keymap.set("n", "<leader>dac", function()

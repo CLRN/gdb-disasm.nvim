@@ -520,10 +520,20 @@ M = {}
 
 M.setup = function(_)
 	vim.keymap.set("n", "<leader>daf", function()
+		local func_name = get_current_function_name()
+		local draw = not last_disasm_target or func_name ~= last_disasm_target.func_name
+
 		disasm_current_func(function(disasm)
-			draw_disasm_lines(0, disasm)
+			if draw then
+				draw_disasm_lines(0, disasm)
+			else
+				last_disasm_target = nil
+				vim.schedule(function()
+					vim.api.nvim_buf_clear_namespace(0, ns_id_asm, 0, -1)
+				end)
+			end
 		end)
-	end, { remap = true, desc = "Disassemble current function" })
+	end, { remap = true, desc = "Toggle disassembly of current function" })
 
 	vim.keymap.set("n", "<leader>das", function()
 		vim.ui.input({ prompt = "Enter name for the saved session: " }, function(input)

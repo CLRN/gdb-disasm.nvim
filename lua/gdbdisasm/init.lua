@@ -3,7 +3,10 @@ local async = require("plenary.async")
 local ts_utils = require("nvim-treesitter.ts_utils")
 local log = require("gdbdisasm.log")
 
-local ns_id = vim.api.nvim_create_namespace("disnav")
+local ns_id_asm = vim.api.nvim_create_namespace("disnav-asm")
+local ns_id_hl = vim.api.nvim_create_namespace("disnav-hl")
+local group_id = vim.api.nvim_create_augroup("disnav", { clear = true })
+
 local last_disasm_lines = {}
 local last_binary_path = ""
 local comms = nil
@@ -13,7 +16,7 @@ local sessions_path = root_path .. "/sessions/"
 local is_auto_reload_enabled = false
 
 local function parse_asm(src)
-	local tree = vim.treesitter.languagetree.new(src, "asm")
+	local tree = vim.treesitter.get_string_parser(src, "asm", {})
 	local root = tree:parse(true)[1]:root()
 
 	local asm_lines = {}
@@ -115,15 +118,15 @@ local function start_gdb()
 		command = "gdb",
 		args = { "--interpreter", "mi" },
 
-		on_stdout = function(err, line)
+		on_stdout = function(_, line)
 			setter.send(line)
 		end,
 
-		on_stderr = function(err, line)
+		on_stderr = function(_, line)
 			vim.notify(string.format("GDB error %s", line), vim.log.levels.ERROR)
 		end,
 
-		on_exit = function(j, return_val)
+		on_exit = function(_, return_val)
 			if return_val ~= 0 then
 				vim.notify(string.format("GDB terminated with %s", return_val), vim.log.levels.ERROR)
 			else
@@ -202,7 +205,7 @@ end
 ---@param lines table
 local function draw_disasm_lines(buf_id, lines)
 	vim.schedule(function()
-		vim.api.nvim_buf_clear_namespace(buf_id, ns_id, 0, -1)
+		vim.api.nvim_buf_clear_namespace(buf_id, ns_id_asm, 0, -1)
 
 		for line_num, text in pairs(lines) do
 			local virt_lines = {}
@@ -212,7 +215,7 @@ local function draw_disasm_lines(buf_id, lines)
 			end
 
 			local col_num = 0
-			vim.api.nvim_buf_set_extmark(buf_id, ns_id, line_num - 1, col_num, {
+			vim.api.nvim_buf_set_extmark(buf_id, ns_id_asm, line_num - 1, col_num, {
 				virt_lines = virt_lines,
 			})
 		end
@@ -273,7 +276,7 @@ local function disassemble_function(opts)
 			disasm[last_line] = {}
 		end
 
-		table.insert(last_disasm_lines, string.format("%-90s // %s:%s", asm, file, last_line))
+		table.insert(last_disasm_lines, { asm, file, last_line })
 
 		if last_line <= opts.line_end + 1 and last_line >= opts.line_start then
 			table.insert(disasm[last_line], asm)
@@ -316,6 +319,9 @@ local function resolve_calls_under_the_cursor()
 
 	async.run(function()
 		make_sure_gdb_is_up_to_date(false)
+		if not comms then
+			return
+		end
 
 		-- fetch what's the function address for the given lines
 		local info = comms({ string.format("info line %s:%s", cur_file, cursor_line) })[1]
@@ -356,7 +362,7 @@ local function resolve_calls_under_the_cursor()
 			vim.schedule(function()
 				vim.ui.select(names, {
 					prompt = "Pick function to jump to",
-				}, function(choice, idx)
+				}, function(_, idx)
 					tx(jumps[idx])
 				end)
 			end)
@@ -389,7 +395,7 @@ end
 
 M = {}
 
-M.setup = function(cfg)
+M.setup = function(_)
 	vim.keymap.set("n", "<leader>daf", function()
 		disasm_current_func(function(disasm)
 			draw_disasm_lines(0, disasm)
@@ -430,7 +436,7 @@ M.setup = function(cfg)
 			format_item = function(item)
 				return item:sub(#sessions_path + 1)
 			end,
-		}, function(choice, idx)
+		}, function(_, idx)
 			if not files[idx] then
 				return
 			end
@@ -459,7 +465,7 @@ M.setup = function(cfg)
 			format_item = function(item)
 				return item:sub(#sessions_path + 1)
 			end,
-		}, function(choice, idx)
+		}, function(_, idx)
 			if files[idx] then
 				os.remove(files[idx])
 			end
@@ -467,7 +473,7 @@ M.setup = function(cfg)
 	end, { remap = true, desc = "Remove saved session" })
 
 	vim.keymap.set("n", "<leader>daq", function()
-		vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
+		vim.api.nvim_buf_clear_namespace(0, ns_id_asm, 0, -1)
 		if comms then
 			local c = comms
 
@@ -482,7 +488,7 @@ M.setup = function(cfg)
 
 	vim.keymap.set("n", "<leader>dad", function()
 		vim.api.nvim_buf_set_lines(0, 0, -1, false, last_disasm_lines)
-    vim.bo.ft = "asm"
+		vim.bo.ft = "asm"
 	end, { remap = true, desc = "Set disassembly text to current buffer for debugging" })
 
 	vim.keymap.set("n", "<leader>dac", function()
@@ -495,9 +501,123 @@ M.setup = function(cfg)
 	end, { remap = true, desc = "Toggle auto reload on build" })
 
 	vim.keymap.set("n", "<leader>dat", function()
-		local src = "call   0x303d0 <boost::cobalt::detail::task_promise<int>::~task_promise()>"
-		local parsed = parse_asm(src)
-		create_asm_with_highlights(parsed)
+		-- remember current buffer and create highlight
+		local src_buf = vim.api.nvim_get_current_buf()
+		local group_name = "bg-hl"
+		local func_name = get_current_function_name()
+
+		vim.api.nvim_set_hl(0, group_name, { bg = "#363545", fg = "#ffffff" })
+		vim.api.nvim_buf_clear_namespace(src_buf, ns_id_asm, 0, -1)
+
+		disasm_current_func(function()
+			vim.schedule(function()
+				-- create new window and buffer
+				vim.api.nvim_command("vsplit")
+
+				local asm_win = vim.api.nvim_get_current_win()
+				local asm_buf = vim.api.nvim_create_buf(true, true)
+				vim.api.nvim_buf_set_name(asm_buf, func_name)
+				vim.api.nvim_win_set_buf(asm_win, asm_buf)
+				vim.bo.ft = "asm"
+
+				-- transform lines to backward map asm -> src
+				local text_lines = {}
+				local asm_to_src = {}
+				local src_to_asm = {}
+				for idx, data in ipairs(last_disasm_lines) do
+					---@diagnostic disable-next-line: deprecated
+					local asm, file, line = unpack(data)
+					table.insert(text_lines, asm)
+					asm_to_src[idx] = { file, line }
+					if not src_to_asm[line] then
+						src_to_asm[line] = {}
+					end
+
+					table.insert(src_to_asm[line], idx)
+				end
+
+				-- set the text
+				vim.api.nvim_buf_set_lines(asm_buf, 0, -1, false, text_lines)
+
+				-- track cursor movement and highlight the src window
+				local asm_auto_id = vim.api.nvim_create_autocmd("CursorMoved", {
+					group = group_id,
+					buffer = asm_buf,
+					callback = function(ev)
+						if ev.buf ~= asm_buf then
+							return
+						end
+
+						---@diagnostic disable-next-line: deprecated
+						local cursor_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
+						---@diagnostic disable-next-line: deprecated
+						local _, line = unpack(asm_to_src[cursor_line])
+
+						vim.api.nvim_buf_clear_namespace(src_buf, ns_id_hl, 0, -1)
+						vim.api.nvim_buf_set_extmark(
+							src_buf,
+							ns_id_hl,
+							line - 1,
+							0,
+							{ end_row = line, hl_group = group_name }
+						)
+					end,
+				})
+
+				local src_auto_id = vim.api.nvim_create_autocmd("CursorMoved", {
+					group = group_id,
+					buffer = src_buf,
+					callback = function(ev)
+						if ev.buf ~= src_buf then
+							return
+						end
+
+						---@diagnostic disable-next-line: deprecated
+						local cursor_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
+						vim.api.nvim_buf_clear_namespace(asm_buf, ns_id_hl, 0, -1)
+						for _, line in ipairs(src_to_asm[cursor_line] or {}) do
+							vim.api.nvim_buf_set_extmark(
+								asm_buf,
+								ns_id_hl,
+								line - 1,
+								0,
+								{ end_row = line, hl_group = group_name }
+							)
+						end
+					end,
+				})
+
+				local clear_ns = function()
+					vim.api.nvim_buf_clear_namespace(src_buf, ns_id_hl, 0, -1)
+					vim.api.nvim_buf_clear_namespace(asm_buf, ns_id_hl, 0, -1)
+				end
+
+				local asm_auto_id_leave = vim.api.nvim_create_autocmd("BufLeave", {
+					buffer = asm_buf,
+					group = group_id,
+					callback = clear_ns,
+				})
+
+				local src_auto_id_leave = vim.api.nvim_create_autocmd("BufLeave", {
+					buffer = src_buf,
+					group = group_id,
+					callback = clear_ns,
+				})
+
+				vim.api.nvim_create_autocmd("BufDelete", {
+					buffer = asm_buf,
+					group = group_id,
+					callback = function()
+						clear_ns()
+						vim.api.nvim_del_autocmd(asm_auto_id)
+						vim.api.nvim_del_autocmd(src_auto_id)
+						vim.api.nvim_del_autocmd(asm_auto_id_leave)
+						vim.api.nvim_del_autocmd(src_auto_id_leave)
+						vim.api.nvim_win_close(asm_win, false)
+					end,
+				})
+			end)
+		end)
 	end, { remap = true, desc = "Test call" })
 end
 

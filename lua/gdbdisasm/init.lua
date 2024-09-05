@@ -519,7 +519,7 @@ end
 M = {}
 
 M.setup = function(_)
-	vim.keymap.set("n", "<leader>daf", function()
+	vim.keymap.set("n", "<leader>dai", function()
 		local func_name = get_current_function_name()
 		local draw = not last_disasm_target or func_name ~= last_disasm_target.func_name
 
@@ -619,11 +619,6 @@ M.setup = function(_)
 		end
 	end, { remap = true, desc = "Clean disassembly and quit GDB" })
 
-	vim.keymap.set("n", "<leader>dad", function()
-		vim.api.nvim_buf_set_lines(0, 0, -1, false, last_disasm_lines)
-		vim.bo.ft = "asm"
-	end, { remap = true, desc = "Set disassembly text to current buffer for debugging" })
-
 	vim.keymap.set("n", "<leader>dac", function()
 		resolve_calls_under_the_cursor()
 	end, { remap = true, desc = "Jump to a call" })
@@ -635,7 +630,7 @@ M.setup = function(_)
 
 	vim.keymap.set(
 		"n",
-		"<leader>dat",
+		"<leader>daw",
 		disassemble_current_function_to_new_window,
 		{ remap = true, desc = "Disassemble to new window" }
 	)

@@ -312,6 +312,7 @@ local function resolve_calls_under_the_cursor()
 			local _, asm = string.match(str, "^%s+(0x[0-9a-h]+)%s+<[^>]+>:([^\n]+)")
 			if asm and asm:find("call ") then
 				local addr, name = string.match(asm, "^[^0]+(0x[0-9a-h]+)%s+([^\n]+)")
+				log.fmt_trace("got function call asm %s, parsed address: %s and name %s", str, addr, name)
 				if name then
 					table.insert(names, name)
 					table.insert(jumps, addr)
@@ -320,6 +321,7 @@ local function resolve_calls_under_the_cursor()
 		end
 
 		if #names == 0 then
+			log.fmt_warn("no function names parsed from %s", vim.inspect(response))
 			return
 		end
 
@@ -342,7 +344,17 @@ local function resolve_calls_under_the_cursor()
 
 		info = comms(string.format("info line *%s", addr))
 		local line, file = string.match(info[1], 'Line%s(%d+)[^"]+["]([^"]+)["]')
+
 		if line ~= nil and file ~= nil then
+			log.fmt_info("parsed line %s and file %s from %s", line, file, info[1])
+
+			if string.sub(file, 1, 1) ~= "/" then
+				-- resolve the relative path to the binary
+				local new_file = vim.fs.dirname(last_binary_path) .. "/" .. file
+				log.fmt_info("resolved file %s from %s and %s", new_file, last_binary_path or "null", file or "null")
+				file = new_file
+			end
+
 			vim.schedule(function()
 				vim.cmd(string.format(":edit %s", file))
 				vim.cmd(string.format(":%d", line))

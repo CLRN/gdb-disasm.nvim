@@ -457,6 +457,7 @@ local function disassemble_current_function_to_new_window()
 				end,
 			})
 
+			-- track cursor movement and highlight the asm window
 			local src_auto_id = vim.api.nvim_create_autocmd("CursorMoved", {
 				group = group_id,
 				buffer = src_buf,

@@ -503,10 +503,10 @@ M.setup = function(_)
 	vim.keymap.set("n", "<leader>dat", function()
 		-- remember current buffer and create highlight
 		local src_buf = vim.api.nvim_get_current_buf()
-		local group_name = "bg-hl"
+		local group_name = "Pmenu"
 		local func_name = get_current_function_name()
 
-		vim.api.nvim_set_hl(0, group_name, { bg = "#363545", fg = "#ffffff" })
+		vim.api.nvim_set_hl(0, "DisasmWhiteOnGrey", { bg = "#363545", fg = "#ffffff" })
 		vim.api.nvim_buf_clear_namespace(src_buf, ns_id_asm, 0, -1)
 
 		disasm_current_func(function()

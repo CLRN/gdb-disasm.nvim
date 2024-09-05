@@ -13,7 +13,7 @@ local comms = nil
 local last_disasm_target = nil
 local root_path = vim.fn.stdpath("data") .. "/gdb-disasm"
 local sessions_path = root_path .. "/sessions/"
-local is_auto_reload_enabled = false
+local is_auto_reload_enabled = true
 
 local function parse_asm(src)
 	local tree = vim.treesitter.get_string_parser(src, "asm", {})

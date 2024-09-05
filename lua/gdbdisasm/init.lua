@@ -516,7 +516,7 @@ M.setup = function(_)
 
 				local asm_win = vim.api.nvim_get_current_win()
 				local asm_buf = vim.api.nvim_create_buf(true, true)
-				vim.api.nvim_buf_set_name(asm_buf, func_name)
+				vim.api.nvim_buf_set_name(asm_buf, func_name .. "-" .. last_binary_path)
 				vim.api.nvim_win_set_buf(asm_win, asm_buf)
 				vim.bo.ft = "asm"
 
@@ -613,7 +613,9 @@ M.setup = function(_)
 						vim.api.nvim_del_autocmd(src_auto_id)
 						vim.api.nvim_del_autocmd(asm_auto_id_leave)
 						vim.api.nvim_del_autocmd(src_auto_id_leave)
-						vim.api.nvim_win_close(asm_win, false)
+						if vim.api.nvim_win_is_valid(asm_win) then
+							vim.api.nvim_win_close(asm_win, false)
+						end
 					end,
 				})
 			end)

@@ -393,6 +393,128 @@ local function resolve_calls_under_the_cursor()
 	end)
 end
 
+local function disassemble_current_function_to_new_window()
+	-- remember current buffer and create highlight
+	local src_buf = vim.api.nvim_get_current_buf()
+	local group_name = "Pmenu"
+	local func_name = get_current_function_name()
+
+	vim.api.nvim_set_hl(0, "DisasmWhiteOnGrey", { bg = "#363545", fg = "#ffffff" })
+	vim.api.nvim_buf_clear_namespace(src_buf, ns_id_asm, 0, -1)
+
+	disasm_current_func(function()
+		vim.schedule(function()
+			-- create new window and buffer
+			vim.api.nvim_command("vsplit")
+
+			local asm_win = vim.api.nvim_get_current_win()
+			local asm_buf = vim.api.nvim_create_buf(true, true)
+			vim.api.nvim_buf_set_name(asm_buf, last_binary_path .. ":" .. func_name .. ":" .. asm_buf)
+			vim.api.nvim_win_set_buf(asm_win, asm_buf)
+			vim.bo.ft = "asm"
+
+			-- transform lines to backward map asm -> src
+			local text_lines = {}
+			local asm_to_src = {}
+			local src_to_asm = {}
+			for idx, data in ipairs(last_disasm_lines) do
+				---@diagnostic disable-next-line: deprecated
+				local asm, file, line = unpack(data)
+				table.insert(text_lines, asm)
+				asm_to_src[idx] = { file, line }
+				if not src_to_asm[line] then
+					src_to_asm[line] = {}
+				end
+
+				table.insert(src_to_asm[line], idx)
+			end
+
+			-- set the text
+			vim.api.nvim_buf_set_lines(asm_buf, 0, -1, false, text_lines)
+
+			-- track cursor movement and highlight the src window
+			local asm_auto_id = vim.api.nvim_create_autocmd("CursorMoved", {
+				group = group_id,
+				buffer = asm_buf,
+				callback = function(ev)
+					if ev.buf ~= asm_buf then
+						return
+					end
+
+					---@diagnostic disable-next-line: deprecated
+					local cursor_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
+					---@diagnostic disable-next-line: deprecated
+					local _, line = unpack(asm_to_src[cursor_line])
+
+					vim.api.nvim_buf_clear_namespace(src_buf, ns_id_hl, 0, -1)
+					vim.api.nvim_buf_set_extmark(
+						src_buf,
+						ns_id_hl,
+						line - 1,
+						0,
+						{ end_row = line, hl_group = group_name }
+					)
+				end,
+			})
+
+			local src_auto_id = vim.api.nvim_create_autocmd("CursorMoved", {
+				group = group_id,
+				buffer = src_buf,
+				callback = function(ev)
+					if ev.buf ~= src_buf then
+						return
+					end
+
+					---@diagnostic disable-next-line: deprecated
+					local cursor_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
+					vim.api.nvim_buf_clear_namespace(asm_buf, ns_id_hl, 0, -1)
+					for _, line in ipairs(src_to_asm[cursor_line] or {}) do
+						vim.api.nvim_buf_set_extmark(
+							asm_buf,
+							ns_id_hl,
+							line - 1,
+							0,
+							{ end_row = line, hl_group = group_name }
+						)
+					end
+				end,
+			})
+
+			local clear_ns = function()
+				vim.api.nvim_buf_clear_namespace(src_buf, ns_id_hl, 0, -1)
+				vim.api.nvim_buf_clear_namespace(asm_buf, ns_id_hl, 0, -1)
+			end
+
+			local asm_auto_id_leave = vim.api.nvim_create_autocmd("BufLeave", {
+				buffer = asm_buf,
+				group = group_id,
+				callback = clear_ns,
+			})
+
+			local src_auto_id_leave = vim.api.nvim_create_autocmd("BufLeave", {
+				buffer = src_buf,
+				group = group_id,
+				callback = clear_ns,
+			})
+
+			vim.api.nvim_create_autocmd("BufDelete", {
+				buffer = asm_buf,
+				group = group_id,
+				callback = function()
+					clear_ns()
+					vim.api.nvim_del_autocmd(asm_auto_id)
+					vim.api.nvim_del_autocmd(src_auto_id)
+					vim.api.nvim_del_autocmd(asm_auto_id_leave)
+					vim.api.nvim_del_autocmd(src_auto_id_leave)
+					if vim.api.nvim_win_is_valid(asm_win) then
+						vim.api.nvim_win_close(asm_win, false)
+					end
+				end,
+			})
+		end)
+	end)
+end
+
 M = {}
 
 M.setup = function(_)
@@ -500,127 +622,12 @@ M.setup = function(_)
 		vim.notify(string.format("Auto reload is %s", is_auto_reload_enabled and "ON" or "OFF"), vim.log.levels.INFO)
 	end, { remap = true, desc = "Toggle auto reload on build" })
 
-	vim.keymap.set("n", "<leader>dat", function()
-		-- remember current buffer and create highlight
-		local src_buf = vim.api.nvim_get_current_buf()
-		local group_name = "Pmenu"
-		local func_name = get_current_function_name()
-
-		vim.api.nvim_set_hl(0, "DisasmWhiteOnGrey", { bg = "#363545", fg = "#ffffff" })
-		vim.api.nvim_buf_clear_namespace(src_buf, ns_id_asm, 0, -1)
-
-		disasm_current_func(function()
-			vim.schedule(function()
-				-- create new window and buffer
-				vim.api.nvim_command("vsplit")
-
-				local asm_win = vim.api.nvim_get_current_win()
-				local asm_buf = vim.api.nvim_create_buf(true, true)
-				vim.api.nvim_buf_set_name(asm_buf, func_name .. "-" .. last_binary_path)
-				vim.api.nvim_win_set_buf(asm_win, asm_buf)
-				vim.bo.ft = "asm"
-
-				-- transform lines to backward map asm -> src
-				local text_lines = {}
-				local asm_to_src = {}
-				local src_to_asm = {}
-				for idx, data in ipairs(last_disasm_lines) do
-					---@diagnostic disable-next-line: deprecated
-					local asm, file, line = unpack(data)
-					table.insert(text_lines, asm)
-					asm_to_src[idx] = { file, line }
-					if not src_to_asm[line] then
-						src_to_asm[line] = {}
-					end
-
-					table.insert(src_to_asm[line], idx)
-				end
-
-				-- set the text
-				vim.api.nvim_buf_set_lines(asm_buf, 0, -1, false, text_lines)
-
-				-- track cursor movement and highlight the src window
-				local asm_auto_id = vim.api.nvim_create_autocmd("CursorMoved", {
-					group = group_id,
-					buffer = asm_buf,
-					callback = function(ev)
-						if ev.buf ~= asm_buf then
-							return
-						end
-
-						---@diagnostic disable-next-line: deprecated
-						local cursor_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
-						---@diagnostic disable-next-line: deprecated
-						local _, line = unpack(asm_to_src[cursor_line])
-
-						vim.api.nvim_buf_clear_namespace(src_buf, ns_id_hl, 0, -1)
-						vim.api.nvim_buf_set_extmark(
-							src_buf,
-							ns_id_hl,
-							line - 1,
-							0,
-							{ end_row = line, hl_group = group_name }
-						)
-					end,
-				})
-
-				local src_auto_id = vim.api.nvim_create_autocmd("CursorMoved", {
-					group = group_id,
-					buffer = src_buf,
-					callback = function(ev)
-						if ev.buf ~= src_buf then
-							return
-						end
-
-						---@diagnostic disable-next-line: deprecated
-						local cursor_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
-						vim.api.nvim_buf_clear_namespace(asm_buf, ns_id_hl, 0, -1)
-						for _, line in ipairs(src_to_asm[cursor_line] or {}) do
-							vim.api.nvim_buf_set_extmark(
-								asm_buf,
-								ns_id_hl,
-								line - 1,
-								0,
-								{ end_row = line, hl_group = group_name }
-							)
-						end
-					end,
-				})
-
-				local clear_ns = function()
-					vim.api.nvim_buf_clear_namespace(src_buf, ns_id_hl, 0, -1)
-					vim.api.nvim_buf_clear_namespace(asm_buf, ns_id_hl, 0, -1)
-				end
-
-				local asm_auto_id_leave = vim.api.nvim_create_autocmd("BufLeave", {
-					buffer = asm_buf,
-					group = group_id,
-					callback = clear_ns,
-				})
-
-				local src_auto_id_leave = vim.api.nvim_create_autocmd("BufLeave", {
-					buffer = src_buf,
-					group = group_id,
-					callback = clear_ns,
-				})
-
-				vim.api.nvim_create_autocmd("BufDelete", {
-					buffer = asm_buf,
-					group = group_id,
-					callback = function()
-						clear_ns()
-						vim.api.nvim_del_autocmd(asm_auto_id)
-						vim.api.nvim_del_autocmd(src_auto_id)
-						vim.api.nvim_del_autocmd(asm_auto_id_leave)
-						vim.api.nvim_del_autocmd(src_auto_id_leave)
-						if vim.api.nvim_win_is_valid(asm_win) then
-							vim.api.nvim_win_close(asm_win, false)
-						end
-					end,
-				})
-			end)
-		end)
-	end, { remap = true, desc = "Test call" })
+	vim.keymap.set(
+		"n",
+		"<leader>dat",
+		disassemble_current_function_to_new_window,
+		{ remap = true, desc = "Disassemble to new window" }
+	)
 end
 
 M.on_build_completed = function()

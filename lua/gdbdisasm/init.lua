@@ -25,8 +25,9 @@ local sessions_path = root_path .. "/sessions/"
 ---@field func_name string
 ---@field	binary_path string
 ---@field	running boolean
----@field disasm_map table<integer, string[]>
----@field full_disasm Disasm[]
+---@field disasm Disasm[]
+---@field src_lines string[]
+---@field ft string
 
 local function parse_asm(src)
 	local tree = vim.treesitter.get_string_parser(src, "asm", {})
@@ -189,6 +190,25 @@ local function start_gdb()
 	return communicate
 end
 
+---Converts full disassembly info to a source location map
+---@param state State
+---@returns table<integer, string[]>
+local function make_disasm_map(state)
+	local disasm_map = {}
+
+	for _, data in ipairs(state.disasm) do
+		if not disasm_map[data.line] then
+			disasm_map[data.line] = {}
+		end
+
+		if data.line <= state.line_end + 1 and data.line >= state.line_start then
+			table.insert(disasm_map[data.line], data.asm)
+		end
+	end
+
+	return disasm_map
+end
+
 ---Renders the disasm text
 ---@param buf_id integer
 ---@param lines table
@@ -217,6 +237,11 @@ end
 local function disassemble_function(state)
 	-- fetch what's the function address for the given lines
 	local info = state.comms({ string.format("info line %s:%s", state.file_path, state.file_line) })[1]
+	if not info[1] then
+		vim.notify(string.format("Unable to resolve %s:%s", state.file_path, state.file_line), vim.log.levels.ERROR)
+		return
+	end
+
 	local func_addr = string.match(info[1], "0x[0-9a-h]+")
 
 	-- disasm function address to asm listing
@@ -236,8 +261,7 @@ local function disassemble_function(state)
 
 	local address_disasm_response = state.comms(commands)
 
-	state.disasm_map = {}
-	state.full_disasm = {}
+	state.disasm = {}
 
 	local last_line = 1
 
@@ -259,15 +283,7 @@ local function disassemble_function(state)
 			log.fmt_warn("unmatched file %s against %s", raw, file)
 		end
 
-		if not state.disasm_map[last_line] then
-			state.disasm_map[last_line] = {}
-		end
-
-		table.insert(state.full_disasm, { asm = asm, file = file, line = last_line })
-
-		if last_line <= state.line_end + 1 and last_line >= state.line_start then
-			table.insert(state.disasm_map[last_line], asm)
-		end
+		table.insert(state.disasm, { asm = asm, file = file, line = last_line })
 	end
 
 	vim.notify(string.format("%s dissasebmled", state.func_name), vim.log.levels.INFO)
@@ -296,8 +312,9 @@ async.run(function()
 		file_line = 0,
 		file_path = "",
 		func_name = "",
-		disasm_map = {},
-		full_disasm = {},
+		disasm = {},
+		src_lines = {},
+		ft = "",
 	}
 
 	while state.running do
@@ -338,7 +355,7 @@ local function get_cmake_target_path()
 end
 
 local function disasm_current_func(on_already_done)
-	-- remember current position and name
+	-- update current state
 	local file_path = vim.fn.expand("%:p")
 	local line_start, line_end = get_current_function_range()
 	local func_name = get_current_function_name()
@@ -346,10 +363,12 @@ local function disasm_current_func(on_already_done)
 	---@diagnostic disable-next-line: deprecated
 	local file_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
 	local cur_file = vim.fn.expand("%:p")
+	local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+	local ft = vim.bo.ft
 
 	-- schedule job
 	job_sender.send(function(state)
-		if state.func_name == func_name and #state.full_disasm then
+		if state.func_name == func_name and #state.disasm then
 			-- already disasmed
 			if on_already_done ~= nil then
 				on_already_done(state)
@@ -363,6 +382,8 @@ local function disasm_current_func(on_already_done)
 		state.line_end = line_end
 		state.cur_file = cur_file
 		state.func_name = func_name
+		state.src_lines = lines
+		state.ft = ft
 
 		disassemble_function(state)
 	end)
@@ -406,7 +427,7 @@ M.toggle_inline_disasm = function()
 
 	job_sender.send(function(state)
 		if state.func_name ~= "" then
-			draw_disasm_lines(current_buf, state.disasm_map)
+			draw_disasm_lines(current_buf, make_disasm_map(state))
 		end
 	end)
 end
@@ -435,7 +456,7 @@ M.new_window_disasm = function()
 			local text_lines = {}
 			local asm_to_src = {}
 			local src_to_asm = {}
-			for idx, data in ipairs(state.full_disasm) do
+			for idx, data in ipairs(state.disasm) do
 				table.insert(text_lines, data.asm)
 				asm_to_src[idx] = { data.file, data.line }
 				if not src_to_asm[data.line] then
@@ -541,7 +562,8 @@ M.resolve_calls_under_the_cursor = function()
 	job_sender.send(function(state)
 		-- fetch current line asm and parse it
 		local commands = {}
-		for _, asm in ipairs(state.disasm_map[file_line]) do
+		local map = make_disasm_map(state)
+		for _, asm in ipairs(map[file_line]) do
 			local match = string.gmatch(asm, "call%s+(0x[0-9a-h]+)")
 			for i in match do
 				table.insert(commands, string.format("info line *%s", i))
@@ -612,6 +634,63 @@ M.resolve_calls_under_the_cursor = function()
 	end)
 end
 
+M.save_current_state = function()
+	vim.ui.input({ prompt = "Enter name for the saved session: " }, function(input)
+		if not input then
+			return
+		end
+
+		local file_path = sessions_path .. input
+
+		disasm_current_func()
+
+		job_sender.send(function(state)
+			local copy = {}
+			for k, v in pairs(state) do
+				if k ~= "comms" then
+					copy[k] = v
+				end
+			end
+
+			vim.schedule(function()
+				vim.fn.writefile({ vim.json.encode(copy) }, file_path)
+				vim.notify(string.format("Saved session to %s", file_path), vim.log.levels.INFO)
+			end)
+		end)
+	end)
+end
+
+M.load_saved_state = function()
+	vim.fn.mkdir(sessions_path, "p")
+
+	local files = vim.split(vim.fn.glob(sessions_path .. "*"), "\n", { trimempty = true })
+
+	vim.ui.select(files, {
+		prompt = "Pick session to load",
+		format_item = function(item)
+			return item:sub(#sessions_path + 1)
+		end,
+	}, function(_, idx)
+		if not files[idx] then
+			return
+		end
+
+		local content = vim.fn.readfile(files[idx])
+		local data = vim.json.decode(content[1])
+
+		vim.bo.ft = data.ft
+		vim.api.nvim_buf_set_lines(0, 0, -1, false, data.src_lines)
+
+		job_sender.send(function(state)
+			for k, v in pairs(data) do
+				state[k] = v
+			end
+
+			draw_disasm_lines(0, make_disasm_map(state))
+		end)
+	end)
+end
+
 M.setup = function(_)
 	vim.keymap.set("n", "<leader>dai", function()
 		local path = get_cmake_target_path()
@@ -622,57 +701,19 @@ M.setup = function(_)
 	end, { remap = true, desc = "Toggle disassembly of current function" })
 
 	vim.keymap.set("n", "<leader>das", function()
-		vim.ui.input({ prompt = "Enter name for the saved session: " }, function(input)
-			if not input then
-				return
-			end
+		local path = get_cmake_target_path()
+		if path then
+			M.set_binary_path(path)
+			M.save_current_state()
+		end
+	end, { remap = true, desc = "Save current session state to a file" })
 
-			local file_path = sessions_path .. input
-			local data = { src = vim.api.nvim_buf_get_lines(0, 0, -1, false), disasm = {}, ft = vim.bo.ft }
-
-			vim.fn.mkdir(sessions_path, "p")
-
-			disasm_current_func(function(disasm)
-				for line_num, text in pairs(disasm) do
-					table.insert(data.disasm, { line_num = line_num, disasm = text })
-				end
-
-				vim.schedule(function()
-					vim.fn.writefile({ vim.json.encode(data) }, file_path)
-					vim.notify(string.format("Saved session to %s", file_path), vim.log.levels.INFO)
-				end)
-			end)
-		end)
-	end, { remap = true, desc = "Disassemble current function and save to history" })
-
-	vim.keymap.set("n", "<leader>dal", function()
-		vim.fn.mkdir(sessions_path, "p")
-
-		local files = vim.split(vim.fn.glob(sessions_path .. "*"), "\n", { trimempty = true })
-
-		vim.ui.select(files, {
-			prompt = "Pick session to load",
-			format_item = function(item)
-				return item:sub(#sessions_path + 1)
-			end,
-		}, function(_, idx)
-			if not files[idx] then
-				return
-			end
-
-			local content = vim.fn.readfile(files[idx])
-			local data = vim.json.decode(content[1])
-
-			local disasm = {}
-			for _, obj in pairs(data.disasm) do
-				disasm[obj.line_num] = obj.disasm
-			end
-
-			vim.bo.ft = data.ft
-			vim.api.nvim_buf_set_lines(0, 0, -1, false, data.src)
-			draw_disasm_lines(0, disasm)
-		end)
-	end, { remap = true, desc = "Load saved session to the current buffer" })
+	vim.keymap.set(
+		"n",
+		"<leader>dal",
+		M.load_saved_state,
+		{ remap = true, desc = "Load saved session to the current buffer" }
+	)
 
 	vim.keymap.set("n", "<leader>dar", function()
 		vim.fn.mkdir(sessions_path, "p")

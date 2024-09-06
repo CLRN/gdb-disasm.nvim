@@ -9,6 +9,7 @@ local group_id = vim.api.nvim_create_augroup("disnav", { clear = true })
 
 local root_path = vim.fn.stdpath("data") .. "/gdb-disasm"
 local sessions_path = root_path .. "/sessions/"
+local job_sender, job_receiver = async.control.channel.mpsc()
 
 ---@class Disasm
 ---@field asm string
@@ -29,6 +30,9 @@ local sessions_path = root_path .. "/sessions/"
 ---@field src_lines string[]
 ---@field ft string
 
+---Parse assembly line to tokens
+---@param src string
+---@return table
 local function parse_asm(src)
 	local tree = vim.treesitter.get_string_parser(src, "asm", {})
 	local root = tree:parse(true)[1]:root()
@@ -55,6 +59,9 @@ local function parse_asm(src)
 	return asm_lines
 end
 
+---Create virtual text with highlights from asm tokens
+---@param asm_lines table
+---@return table
 local function create_asm_with_highlights(asm_lines)
 	local hl_map = {
 		["word"] = "@function.builtin.asm",
@@ -297,61 +304,6 @@ local function reload_gdb(state)
 	vim.notify(string.format("Loading %s", state.binary_path), vim.log.levels.INFO)
 	state.comms({ string.format("file %s", state.binary_path) })
 	vim.notify(string.format("Disassembly completed"), vim.log.levels.INFO)
-end
-
-local job_sender, job_receiver = async.control.channel.mpsc()
-async.run(function()
-	---@type State
-	local state = {
-		comms = nil,
-		running = true,
-		binary_path = "",
-		cur_file = "",
-		line_start = 0,
-		line_end = 0,
-		file_line = 0,
-		file_path = "",
-		func_name = "",
-		disasm = {},
-		src_lines = {},
-		ft = "",
-	}
-
-	while state.running do
-		local item = job_receiver.recv()
-
-		-- start lazily
-		state.comms = state.comms or start_gdb()
-
-		---@diagnostic disable-next-line: deprecated
-		local job, callback = type(item) == "table" and unpack(item) or item, nil
-
-		job(state)
-
-		-- vim.print(vim.inspect(state))
-
-		if callback then
-			callback(state)
-		end
-	end
-
-	vim.notify("Exiting main event loop", vim.log.levels.INFO)
-end)
-
-local function get_cmake_target_path()
-	local status, cmake = pcall(require, "cmake-tools")
-	if not status then
-		vim.notify("unable to load cmake-tools", vim.log.levels.ERROR)
-		return
-	end
-	local target = cmake.get_launch_target()
-	if not target then
-		vim.notify("unable to load cmake target", vim.log.levels.ERROR)
-		return
-	end
-
-	local path = cmake.get_launch_path(target) .. target
-	return path
 end
 
 local function disasm_current_func(on_already_done)
@@ -691,88 +643,73 @@ M.load_saved_state = function()
 	end)
 end
 
-M.setup = function(_)
-	vim.keymap.set("n", "<leader>dai", function()
-		local path = get_cmake_target_path()
-		if path then
-			M.set_binary_path(path)
-			M.toggle_inline_disasm()
+M.remove_saved_state = function()
+	vim.fn.mkdir(sessions_path, "p")
+
+	local files = vim.split(vim.fn.glob(sessions_path .. "*"), "\n", { trimempty = true })
+
+	vim.ui.select(files, {
+		prompt = "Pick session to remove",
+		format_item = function(item)
+			return item:sub(#sessions_path + 1)
+		end,
+	}, function(_, idx)
+		if files[idx] then
+			os.remove(files[idx])
 		end
-	end, { remap = true, desc = "Toggle disassembly of current function" })
-
-	vim.keymap.set("n", "<leader>das", function()
-		local path = get_cmake_target_path()
-		if path then
-			M.set_binary_path(path)
-			M.save_current_state()
-		end
-	end, { remap = true, desc = "Save current session state to a file" })
-
-	vim.keymap.set(
-		"n",
-		"<leader>dal",
-		M.load_saved_state,
-		{ remap = true, desc = "Load saved session to the current buffer" }
-	)
-
-	vim.keymap.set("n", "<leader>dar", function()
-		vim.fn.mkdir(sessions_path, "p")
-
-		local files = vim.split(vim.fn.glob(sessions_path .. "*"), "\n", { trimempty = true })
-
-		vim.ui.select(files, {
-			prompt = "Pick session to remove",
-			format_item = function(item)
-				return item:sub(#sessions_path + 1)
-			end,
-		}, function(_, idx)
-			if files[idx] then
-				os.remove(files[idx])
-			end
-		end)
-	end, { remap = true, desc = "Remove saved session" })
-
-	vim.keymap.set("n", "<leader>daq", function()
-		M.stop()
-	end, { remap = true, desc = "Clean disassembly and quit GDB" })
-
-	vim.keymap.set("n", "<leader>dac", function()
-		local path = get_cmake_target_path()
-		if path then
-			M.set_binary_path(path)
-			M.resolve_calls_under_the_cursor()
-		end
-	end, { remap = true, desc = "Jump to a call" })
-
-	vim.keymap.set("n", "<leader>dab", function()
-		is_auto_reload_enabled = not is_auto_reload_enabled
-		vim.notify(string.format("Auto reload is %s", is_auto_reload_enabled and "ON" or "OFF"), vim.log.levels.INFO)
-	end, { remap = true, desc = "Toggle auto reload on build" })
-
-	vim.keymap.set("n", "<leader>daw", function()
-		local path = get_cmake_target_path()
-		if path then
-			M.set_binary_path(path)
-			M.new_window_disasm()
-		end
-	end, { remap = true, desc = "Disassemble to new window" })
+	end)
 end
 
-M.on_build_completed = function()
-	if is_auto_reload_enabled then
-		local func_name = get_current_function_name()
-		async.run(function()
-			make_sure_gdb_is_up_to_date(true)
+M.setup = function(_)
+	async.run(function()
+		---@type State
+		local state = {
+			comms = nil,
+			running = true,
+			binary_path = "",
+			cur_file = "",
+			line_start = 0,
+			line_end = 0,
+			file_line = 0,
+			file_path = "",
+			func_name = "",
+			disasm = {},
+			src_lines = {},
+			ft = "",
+		}
 
-			if last_disasm_target and func_name == last_disasm_target.func_name then
-				vim.schedule(function()
-					disasm_current_func(function(disasm)
-						draw_disasm_lines(0, disasm)
-					end)
-				end)
+		while state.running do
+			local item = job_receiver.recv()
+
+			-- start lazily
+			state.comms = state.comms or start_gdb()
+
+			---@diagnostic disable-next-line: deprecated
+			local job, callback = type(item) == "table" and unpack(item) or item, nil
+
+			job(state)
+
+			if callback then
+				callback(state)
 			end
-		end)
-	end
+		end
+
+		vim.notify("Exiting main event loop", vim.log.levels.INFO)
+	end)
+end
+
+M.update_asm_display = function()
+	local func_name = get_current_function_name()
+	local current_buf = vim.api.nvim_get_current_buf()
+
+	job_sender.send(function(state)
+		if state.func_name ~= func_name then
+			return
+		end
+
+		disasm_current_func()
+		draw_disasm_lines(current_buf, make_disasm_map(state))
+	end)
 end
 
 return M

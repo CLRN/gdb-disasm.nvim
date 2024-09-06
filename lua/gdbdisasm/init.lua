@@ -15,6 +15,24 @@ local root_path = vim.fn.stdpath("data") .. "/gdb-disasm"
 local sessions_path = root_path .. "/sessions/"
 local is_auto_reload_enabled = true
 
+---@class Disasm
+---@field asm string
+---@field file string
+---@field line integer
+
+---@class State
+---@field comms? function(table, boolean): string[][]
+---@field file_path string
+---@field file_line integer
+---@field	line_start integer
+---@field	line_end integer
+---@field	cur_file string
+---@field func_name string
+---@field	binary_path string
+---@field	running boolean
+---@field disasm_map table<integer, string[]>
+---@field full_disasm Disasm[]
+
 local function parse_asm(src)
 	local tree = vim.treesitter.get_string_parser(src, "asm", {})
 	local root = tree:parse(true)[1]:root()
@@ -139,12 +157,16 @@ local function start_gdb()
 
 	vim.notify(string.format("GDB started"), vim.log.levels.INFO)
 
-	local function communicate(commands)
+	local function communicate(commands, ignore_response)
 		log.trace("writing '" .. table.concat(commands, ",") .. "'")
 		local lines = {}
 		for _, cmd in ipairs(commands) do
 			job:send(cmd .. "\n")
 			table.insert(lines, {})
+		end
+
+		if ignore_response then
+			return lines
 		end
 
 		local count = 0
@@ -165,6 +187,9 @@ local function start_gdb()
 			end
 		end
 	end
+
+	-- set some settings
+	communicate({ "set disassembly-flavor intel", "set print asm-demangle" })
 
 	return communicate
 end
@@ -187,9 +212,6 @@ local function make_sure_gdb_is_up_to_date(force)
 
 	if not comms then
 		comms = start_gdb()
-
-		-- set some settings
-		comms({ "set disassembly-flavor intel", "set print asm-demangle" })
 	end
 
 	-- load file
@@ -223,17 +245,15 @@ local function draw_disasm_lines(buf_id, lines)
 	end)
 end
 
-local function disassemble_function(opts)
-	if not comms then
-		return
-	end
-
+---Dissasebmles the function specified in the state and updates the state
+---@param state State
+local function disassemble_function(state)
 	-- fetch what's the function address for the given lines
-	local info = comms({ string.format("info line %s:%s", opts.file_path, opts.file_line) })[1]
+	local info = state.comms({ string.format("info line %s:%s", state.file_path, state.file_line) })[1]
 	local func_addr = string.match(info[1], "0x[0-9a-h]+")
 
 	-- disasm function address to asm listing
-	local func_disasm_response = comms({ string.format("disassemble %s", func_addr) })[1]
+	local func_disasm_response = state.comms({ string.format("disassemble %s", func_addr) })[1]
 
 	local commands = {}
 	local parsed_asm = {}
@@ -247,12 +267,12 @@ local function disassemble_function(opts)
 		end
 	end
 
-	local address_disasm_response = comms(commands)
+	local address_disasm_response = state.comms(commands)
 
-	local disasm = {}
+	state.disasm_map = {}
+	state.full_disasm = {}
+
 	local last_line = 1
-
-	last_disasm_lines = {}
 
 	-- for each command response parse source code location
 	for addr_idx, command_response in ipairs(address_disasm_response) do
@@ -265,25 +285,23 @@ local function disassemble_function(opts)
 
 		local file = s:sub(1, delim - 1)
 		local line = tonumber(s:sub(delim + 1))
-		if line and opts.cur_file == file then
+		if line and state.cur_file == file then
 			last_line = line
 		else
 			asm = string.format("%-90s // %s:%s", asm, file, line)
 			log.fmt_warn("unmatched file %s against %s", raw, file)
 		end
 
-		if not disasm[last_line] then
-			disasm[last_line] = {}
+		if not state.disasm_map[last_line] then
+			state.disasm_map[last_line] = {}
 		end
 
-		table.insert(last_disasm_lines, { asm, file, last_line })
+		table.insert(state.full_disasm, { asm = asm, file = file, line = last_line })
 
-		if last_line <= opts.line_end + 1 and last_line >= opts.line_start then
-			table.insert(disasm[last_line], asm)
+		if last_line <= state.line_end + 1 and last_line >= state.line_start then
+			table.insert(state.disasm_map[last_line], asm)
 		end
 	end
-
-	return disasm
 end
 
 ---Disassembles current function and calls provided callback with a table containing line nums and text
@@ -516,23 +534,132 @@ local function disassemble_current_function_to_new_window()
 	end)
 end
 
+---Reloads GDB binary
+---@param state State
+local function reload_gdb(state)
+	-- seems like GDB is smart enough to detect if the binary needs reloading
+	-- if this causes performance issues there should be a binary hash check here
+	vim.notify(string.format("Loading %s", state.binary_path), vim.log.levels.INFO)
+	state.comms({ string.format("file %s", state.binary_path) })
+	vim.notify(string.format("Disassembly completed"), vim.log.levels.INFO)
+end
+
+local job_sender, job_receiver = async.control.channel.mpsc()
+async.run(function()
+	---@type State
+	local state = {
+		comms = nil,
+		running = true,
+		binary_path = "",
+		cur_file = "",
+		line_start = 0,
+		line_end = 0,
+		file_line = 0,
+		file_path = "",
+		func_name = "",
+		disasm_map = {},
+		full_disasm = {},
+	}
+
+	while state.running do
+		local item = job_receiver.recv()
+
+		-- start lazily
+		state.comms = state.comms or start_gdb()
+
+		---@diagnostic disable-next-line: deprecated
+		local job, callback = type(item) == "table" and unpack(item) or item, nil
+
+		job(state)
+
+		-- vim.print(vim.inspect(state))
+
+		if callback then
+			callback(state)
+		end
+	end
+
+	vim.notify("Exiting main event loop", vim.log.levels.INFO)
+end)
+
+local function get_cmake_target_path()
+	local status, cmake = pcall(require, "cmake-tools")
+	if not status then
+		vim.notify("unable to load cmake-tools", vim.log.levels.ERROR)
+		return
+	end
+	local target = cmake.get_launch_target()
+	if not target then
+		vim.notify("unable to load cmake target", vim.log.levels.ERROR)
+		return
+	end
+
+	local path = cmake.get_launch_path(target) .. target
+	return path
+end
+
 M = {}
+
+---Sets path to binary
+---@param path string
+M.set_binary_path = function(path)
+	job_sender.send(function(state)
+		state.binary_path = path
+		reload_gdb(state)
+	end)
+end
+
+M.stop = function(stop_loop)
+	vim.api.nvim_buf_clear_namespace(0, ns_id_asm, 0, -1)
+
+	job_sender.send(function(state)
+		state.running = not stop_loop
+		state.comms({ "quit" }, true)
+		state.comms = nil
+		state.func_name = ""
+	end)
+end
+
+M.toggle_inline_disasm = function()
+	local file_path = vim.fn.expand("%:p")
+	local line_start, line_end = get_current_function_range()
+	local func_name = get_current_function_name()
+	local current_buf = vim.api.nvim_get_current_buf()
+
+	---@diagnostic disable-next-line: deprecated
+	local file_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
+	local cur_file = vim.fn.expand("%:p")
+
+	job_sender.send(function(state)
+		if state.func_name == func_name then
+			-- we have already disasmed this, so this is toggle off
+			vim.schedule(function()
+				vim.api.nvim_buf_clear_namespace(current_buf, ns_id_asm, 0, -1)
+			end)
+
+			state.func_name = ""
+			return
+		end
+
+		state.file_path = file_path
+		state.file_line = file_line
+		state.line_start = line_start
+		state.line_end = line_end
+		state.cur_file = cur_file
+		state.func_name = func_name
+
+		disassemble_function(state)
+		draw_disasm_lines(current_buf, state.disasm_map)
+	end)
+end
 
 M.setup = function(_)
 	vim.keymap.set("n", "<leader>dai", function()
-		local func_name = get_current_function_name()
-		local draw = not last_disasm_target or func_name ~= last_disasm_target.func_name
-
-		disasm_current_func(function(disasm)
-			if draw then
-				draw_disasm_lines(0, disasm)
-			else
-				last_disasm_target = nil
-				vim.schedule(function()
-					vim.api.nvim_buf_clear_namespace(0, ns_id_asm, 0, -1)
-				end)
-			end
-		end)
+		local path = get_cmake_target_path()
+		if path then
+			M.set_binary_path(path)
+			M.toggle_inline_disasm()
+		end
 	end, { remap = true, desc = "Toggle disassembly of current function" })
 
 	vim.keymap.set("n", "<leader>das", function()
@@ -606,17 +733,7 @@ M.setup = function(_)
 	end, { remap = true, desc = "Remove saved session" })
 
 	vim.keymap.set("n", "<leader>daq", function()
-		vim.api.nvim_buf_clear_namespace(0, ns_id_asm, 0, -1)
-		if comms then
-			local c = comms
-
-			async.run(function()
-				c({ string.format("quit") })
-			end)
-
-			comms = nil
-			last_binary_path = ""
-		end
+		M.stop()
 	end, { remap = true, desc = "Clean disassembly and quit GDB" })
 
 	vim.keymap.set("n", "<leader>dac", function()

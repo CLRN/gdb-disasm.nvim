@@ -269,87 +269,8 @@ local function disassemble_function(state)
 			table.insert(state.disasm_map[last_line], asm)
 		end
 	end
-end
 
-local function resolve_calls_under_the_cursor()
-	local cur_file = vim.fn.expand("%:p")
-	---@diagnostic disable-next-line: deprecated
-	local cursor_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
-
-	async.run(function()
-		make_sure_gdb_is_up_to_date(false)
-		if not comms then
-			return
-		end
-
-		-- fetch what's the function address for the given lines
-		local info = comms({ string.format("info line %s:%s", cur_file, cursor_line) })[1]
-
-		local match = string.gmatch(info[1], "0x[0-9a-h]+")
-		local addresses = {}
-		for i in match do
-			table.insert(addresses, i)
-		end
-
-		-- disasm function address
-		local response = comms({ string.format("disassemble %s,%s", addresses[1], addresses[2]) })[1]
-		local names = {}
-		local jumps = {}
-		for _, str in ipairs(response) do
-			local _, asm = string.match(str, "^%s+(0x[0-9a-h]+)%s+<[^>]+>:([^\n]+)")
-			if asm and asm:find("call ") then
-				local addr, name = string.match(asm, "^[^0]+(0x[0-9a-h]+)%s+([^\n]+)")
-				log.fmt_trace("got function call asm %s, parsed address: %s and name %s", str, addr, name)
-				if name then
-					table.insert(names, name)
-					table.insert(jumps, addr)
-				end
-			end
-		end
-
-		if #names == 0 then
-			log.fmt_warn("no function names parsed from %s", vim.inspect(response))
-			return
-		end
-
-		local tx, rx = async.control.channel.oneshot()
-		local addr = nil
-
-		if #names == 1 then
-			addr = jumps[1]
-		else
-			vim.schedule(function()
-				vim.ui.select(names, {
-					prompt = "Pick function to jump to",
-				}, function(_, idx)
-					tx(jumps[idx])
-				end)
-			end)
-
-			addr = rx()
-		end
-
-		info = comms({ string.format("info line *%s", addr) })[1]
-		local line, file = string.match(info[1], 'Line%s(%d+)[^"]+["]([^"]+)["]')
-
-		if line ~= nil and file ~= nil then
-			log.fmt_info("parsed line %s and file %s from %s", line, file, info[1])
-
-			if string.sub(file, 1, 1) ~= "/" then
-				-- resolve the relative path to the binary
-				local new_file = vim.fs.dirname(last_binary_path) .. "/" .. file
-				log.fmt_info("resolved file %s from %s and %s", new_file, last_binary_path or "null", file or "null")
-				file = new_file
-			end
-
-			vim.schedule(function()
-				vim.cmd(string.format(":edit %s", file))
-				vim.cmd(string.format(":%d", line))
-			end)
-		else
-			vim.notify(string.format("Unable to resolve address %s", addr), vim.log.levels.WARN)
-		end
-	end)
+	vim.notify(string.format("%s dissasebmled", state.func_name), vim.log.levels.INFO)
 end
 
 ---Reloads GDB binary
@@ -471,11 +392,8 @@ M.toggle_inline_disasm = function()
 	end)
 end
 
----Disassembles current function and renders the results to new window
-M.new_window_disasm = function()
-	-- remember current buffer and create highlight
-	local src_buf = vim.api.nvim_get_current_buf()
-	local group_name = "Pmenu"
+local function disasm_current_func()
+	-- remember current position and name
 	local file_path = vim.fn.expand("%:p")
 	local line_start, line_end = get_current_function_range()
 	local func_name = get_current_function_name()
@@ -484,10 +402,13 @@ M.new_window_disasm = function()
 	local file_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
 	local cur_file = vim.fn.expand("%:p")
 
-	vim.api.nvim_set_hl(0, "DisasmWhiteOnGrey", { bg = "#363545", fg = "#ffffff" })
-	vim.api.nvim_buf_clear_namespace(src_buf, ns_id_asm, 0, -1)
-
+	-- schedule job
 	job_sender.send(function(state)
+		if state.func_name == func_name and #state.full_disasm then
+			-- already disasmed
+			return
+		end
+
 		state.file_path = file_path
 		state.file_line = file_line
 		state.line_start = line_start
@@ -498,10 +419,20 @@ M.new_window_disasm = function()
 		disassemble_function(state)
 	end)
 
+	return func_name
+end
+
+---Disassembles current function and renders the results to new window
+M.new_window_disasm = function()
+	local func_name = disasm_current_func()
+	local src_buf = vim.api.nvim_get_current_buf()
+
+	vim.api.nvim_set_hl(0, "DisasmWhiteOnGrey", { bg = "#363545", fg = "#ffffff" })
+	vim.api.nvim_buf_clear_namespace(src_buf, ns_id_asm, 0, -1)
+
+	local group_name = "Pmenu"
 	job_sender.send(function(state)
 		vim.schedule(function()
-			vim.print(vim.inspect(state))
-
 			-- create new window and buffer
 			vim.api.nvim_command("vsplit")
 
@@ -612,6 +543,86 @@ M.new_window_disasm = function()
 	end)
 end
 
+M.resolve_calls_under_the_cursor = function()
+	disasm_current_func()
+
+	---@diagnostic disable-next-line: deprecated
+	local file_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
+
+	job_sender.send(function(state)
+		-- fetch current line asm and parse it
+		local commands = {}
+		for _, asm in ipairs(state.disasm_map[file_line]) do
+			local match = string.gmatch(asm, "call%s+(0x[0-9a-h]+)")
+			for i in match do
+				table.insert(commands, string.format("info line *%s", i))
+			end
+		end
+
+		-- disasm all function calls to info
+		local response = state.comms(commands)
+
+		local names = {}
+		local jumps = {}
+		local start_pattern = "starts at address"
+		for _, lines in ipairs(response) do
+			local s = lines[1]
+			local line, file = string.match(s, 'Line%s(%d+)[^"]+["]([^"]+)["]')
+			if line and file then
+				local begin = s:find(start_pattern) + #start_pattern + 1
+				local name = s:sub(s:find(" ", begin), s:find("and ends at") - 1)
+				table.insert(names, string.format("%s at %s:%s", name, file, line))
+				table.insert(jumps, { file, line })
+			end
+		end
+
+		if #names == 0 then
+			log.fmt_warn("no function names parsed from %s", vim.inspect(response))
+			return
+		end
+
+		local tx, rx = async.control.channel.oneshot()
+		local location = nil
+
+		if #names == 1 then
+			location = jumps[1]
+		else
+			vim.schedule(function()
+				vim.ui.select(names, {
+					prompt = "Pick function to jump to",
+				}, function(_, idx)
+					tx(jumps[idx])
+				end)
+			end)
+
+			location = rx()
+		end
+
+		if not location then
+			return
+		end
+
+		---@diagnostic disable-next-line: deprecated
+		local file, line = unpack(location)
+
+		if line ~= nil and file ~= nil then
+			if string.sub(file, 1, 1) ~= "/" then
+				-- resolve the relative path to the binary
+				local new_file = vim.fs.dirname(state.binary_path) .. "/" .. file
+				log.fmt_info("Resolved file %s from %s and %s", new_file, state.binary_path or "null", file or "null")
+				file = new_file
+			end
+
+			vim.schedule(function()
+				vim.cmd(string.format(":edit %s", file))
+				vim.cmd(string.format(":%d", line))
+			end)
+		else
+			vim.notify(string.format("Unable to resolve address %s", location), vim.log.levels.WARN)
+		end
+	end)
+end
+
 M.setup = function(_)
 	vim.keymap.set("n", "<leader>dai", function()
 		local path = get_cmake_target_path()
@@ -696,7 +707,11 @@ M.setup = function(_)
 	end, { remap = true, desc = "Clean disassembly and quit GDB" })
 
 	vim.keymap.set("n", "<leader>dac", function()
-		resolve_calls_under_the_cursor()
+		local path = get_cmake_target_path()
+		if path then
+			M.set_binary_path(path)
+			M.resolve_calls_under_the_cursor()
+		end
 	end, { remap = true, desc = "Jump to a call" })
 
 	vim.keymap.set("n", "<leader>dab", function()

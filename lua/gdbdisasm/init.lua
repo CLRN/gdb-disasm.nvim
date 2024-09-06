@@ -337,6 +337,39 @@ local function get_cmake_target_path()
 	return path
 end
 
+local function disasm_current_func(on_already_done)
+	-- remember current position and name
+	local file_path = vim.fn.expand("%:p")
+	local line_start, line_end = get_current_function_range()
+	local func_name = get_current_function_name()
+
+	---@diagnostic disable-next-line: deprecated
+	local file_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
+	local cur_file = vim.fn.expand("%:p")
+
+	-- schedule job
+	job_sender.send(function(state)
+		if state.func_name == func_name and #state.full_disasm then
+			-- already disasmed
+			if on_already_done ~= nil then
+				on_already_done(state)
+			end
+			return
+		end
+
+		state.file_path = file_path
+		state.file_line = file_line
+		state.line_start = line_start
+		state.line_end = line_end
+		state.cur_file = cur_file
+		state.func_name = func_name
+
+		disassemble_function(state)
+	end)
+
+	return func_name
+end
+
 M = {}
 
 ---Sets path to binary
@@ -360,66 +393,22 @@ M.stop = function(stop_loop)
 end
 
 M.toggle_inline_disasm = function()
-	local file_path = vim.fn.expand("%:p")
-	local line_start, line_end = get_current_function_range()
-	local func_name = get_current_function_name()
 	local current_buf = vim.api.nvim_get_current_buf()
 
-	---@diagnostic disable-next-line: deprecated
-	local file_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
-	local cur_file = vim.fn.expand("%:p")
+	disasm_current_func(function(state)
+		-- we have already disasmed this, so this is toggle off
+		vim.schedule(function()
+			vim.api.nvim_buf_clear_namespace(current_buf, ns_id_asm, 0, -1)
+		end)
 
-	job_sender.send(function(state)
-		if state.func_name == func_name then
-			-- we have already disasmed this, so this is toggle off
-			vim.schedule(function()
-				vim.api.nvim_buf_clear_namespace(current_buf, ns_id_asm, 0, -1)
-			end)
-
-			state.func_name = ""
-			return
-		end
-
-		state.file_path = file_path
-		state.file_line = file_line
-		state.line_start = line_start
-		state.line_end = line_end
-		state.cur_file = cur_file
-		state.func_name = func_name
-
-		disassemble_function(state)
-		draw_disasm_lines(current_buf, state.disasm_map)
-	end)
-end
-
-local function disasm_current_func()
-	-- remember current position and name
-	local file_path = vim.fn.expand("%:p")
-	local line_start, line_end = get_current_function_range()
-	local func_name = get_current_function_name()
-
-	---@diagnostic disable-next-line: deprecated
-	local file_line, _ = unpack(vim.api.nvim_win_get_cursor(0))
-	local cur_file = vim.fn.expand("%:p")
-
-	-- schedule job
-	job_sender.send(function(state)
-		if state.func_name == func_name and #state.full_disasm then
-			-- already disasmed
-			return
-		end
-
-		state.file_path = file_path
-		state.file_line = file_line
-		state.line_start = line_start
-		state.line_end = line_end
-		state.cur_file = cur_file
-		state.func_name = func_name
-
-		disassemble_function(state)
+		state.func_name = ""
 	end)
 
-	return func_name
+	job_sender.send(function(state)
+		if state.func_name ~= "" then
+			draw_disasm_lines(current_buf, state.disasm_map)
+		end
+	end)
 end
 
 ---Disassembles current function and renders the results to new window

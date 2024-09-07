@@ -319,6 +319,7 @@ local function disasm_current_func(on_already_done)
 	local ft = vim.bo.ft
 
 	-- schedule job
+	job_sender.send(reload_gdb)
 	job_sender.send(function(state)
 		if state.func_name == func_name and #state.disasm then
 			-- already disasmed
@@ -350,7 +351,6 @@ M = {}
 M.set_binary_path = function(path)
 	job_sender.send(function(state)
 		state.binary_path = path
-		reload_gdb(state)
 	end)
 end
 

@@ -20,9 +20,20 @@ This plugin works by disassembling the actual binary you have compiled on your e
 
 # Demos
 
+## Inline assembly display and toggle
+
 ![inline asm](./doc/inline_Trim_1.0.gif.gif)
+
+## ASM in separate window with highlighting
+
 ![window asm](./doc/window_Trim_3.gif)
+
+## Auto update on build
+
 ![update asm](./doc/update_Trim_1.0.gif)
+
+# Diff
+
 ![diff asm](./doc/diff_Trim_1.0.gif)
 
 # Configuration

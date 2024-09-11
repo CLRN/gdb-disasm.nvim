@@ -1,5 +1,6 @@
 
 int calc(int x, int y)
 {
-    return x + y;
+    volatile int val = 0;
+    return x + y + val;
 }

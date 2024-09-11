@@ -47,7 +47,7 @@ local function parse_asm(src)
     if lvl == 2 then
       local text = vim.treesitter.get_node_text(obj, src)
       table.insert(asm_lines, { obj:type(), text })
-      log.fmt_trace("lvl %s, type: %s, text: %s", lvl, obj:type(), text or "null")
+      -- log.fmt_trace("lvl %s, type: %s, text: %s", lvl, obj:type(), text or "null")
     end
 
     for child, _ in obj:iter_children() do
@@ -97,7 +97,7 @@ local function create_asm_with_highlights(asm_lines)
     end
 
     local hl = hl_map[data[1]] or "@variable.builtin.asm"
-    log.fmt_trace("type %s, text: %s, hl: %s", data[1], data[2], hl)
+    -- log.fmt_trace("type %s, text: %s, hl: %s", data[1], data[2], hl)
     table.insert(res, { string.format(pattern, data[2]), { "Comment", hl } })
     last_type = data[1]
   end
@@ -221,6 +221,8 @@ end
 ---@param lines table
 local function draw_disasm_lines(buf_id, lines)
   vim.schedule(function()
+    log.fmt_info("Drawing %s lines on %s", #lines, buf_id)
+
     vim.api.nvim_buf_clear_namespace(buf_id, ns_id_asm, 0, -1)
 
     for line_num, text in pairs(lines) do
@@ -239,7 +241,7 @@ local function draw_disasm_lines(buf_id, lines)
   end)
 end
 
----Dissasebmles the function specified in the state and updates the state
+---Disassembles the function specified in the state and updates the state
 ---@param state State
 local function disassemble_function(state)
   -- fetch what's the function address for the given lines
@@ -302,8 +304,12 @@ local function reload_gdb(state)
   -- seems like GDB is smart enough to detect if the binary needs reloading
   -- if this causes performance issues there should be a binary hash check here
   vim.notify(string.format("Loading %s", state.binary_path), vim.log.levels.INFO)
+  log.fmt_info("Loading %s", state.binary_path)
+
   state.comms({ string.format("file %s", state.binary_path) })
-  vim.notify(string.format("Disassembly completed"), vim.log.levels.INFO)
+
+  vim.notify(string.format("Symbol loading completed"), vim.log.levels.INFO)
+  log.fmt_info("Symbol loading completed")
 end
 
 local function disasm_current_func(on_already_done)
@@ -318,14 +324,14 @@ local function disasm_current_func(on_already_done)
   local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
   local ft = vim.bo.ft
 
+  log.fmt_info("Dissasebmling %s from %s range %s-%s", func_name, file_path, line_start, line_end)
+
   -- schedule job
   job_sender.send(reload_gdb)
+
   job_sender.send(function(state)
-    if state.func_name == func_name and #state.disasm then
-      -- already disasmed
-      if on_already_done ~= nil then
-        on_already_done(state)
-      end
+    if on_already_done and on_already_done(state) then
+      log.fmt_info("Provided on_already_done callback returned true, ignoring")
       return
     end
 
@@ -367,14 +373,19 @@ end
 
 M.toggle_inline_disasm = function()
   local current_buf = vim.api.nvim_get_current_buf()
+  local func_name = get_current_function_name()
 
   disasm_current_func(function(state)
-    -- we have already disasmed this, so this is toggle off
-    vim.schedule(function()
-      vim.api.nvim_buf_clear_namespace(current_buf, ns_id_asm, 0, -1)
-    end)
+    if state.func_name == func_name and #state.disasm then
+      vim.schedule(function()
+        vim.api.nvim_buf_clear_namespace(current_buf, ns_id_asm, 0, -1)
+      end)
 
-    state.func_name = ""
+      state.func_name = ""
+      return true
+    end
+
+    return false
   end)
 
   job_sender.send(function(state)
@@ -679,18 +690,15 @@ M.setup = function(_)
     }
 
     while state.running do
-      local item = job_receiver.recv()
+      local job = job_receiver.recv()
 
       -- start lazily
       state.comms = state.comms or start_gdb()
 
-      ---@diagnostic disable-next-line: deprecated
-      local job, callback = type(item) == "table" and unpack(item) or item, nil
-
-      job(state)
-
-      if callback then
-        callback(state)
+      local status, err = pcall(job, state)
+      if not status then
+        log.fmt_error("Call failed, error: %s, state: %s", err, vim.inspect(state))
+        vim.notify(string.format("Call failed, error: %s, state: %s", err, vim.inspect(state)), vim.log.levels.ERROR)
       end
     end
 
@@ -701,14 +709,20 @@ end
 M.update_asm_display = function()
   local func_name = get_current_function_name()
   local current_buf = vim.api.nvim_get_current_buf()
+  local need_update = false
+
+  disasm_current_func(function(state)
+    -- we have already disasmed this, so this is going to be an update
+    if func_name and state.func_name == func_name then
+      need_update = true
+    end
+    return not need_update
+  end)
 
   job_sender.send(function(state)
-    if not func_name or state.func_name ~= func_name then
-      return
+    if need_update then
+      draw_disasm_lines(current_buf, make_disasm_map(state))
     end
-
-    disasm_current_func()
-    draw_disasm_lines(current_buf, make_disasm_map(state))
   end)
 end
 

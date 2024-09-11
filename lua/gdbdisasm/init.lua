@@ -401,7 +401,6 @@ M.new_window_disasm = function()
   local src_buf = vim.api.nvim_get_current_buf()
 
   vim.api.nvim_set_hl(0, "DisasmWhiteOnGrey", { bg = "#363545", fg = "#ffffff" })
-  vim.api.nvim_buf_clear_namespace(src_buf, ns_id_asm, 0, -1)
 
   local group_name = "Pmenu"
   job_sender.send(function(state)

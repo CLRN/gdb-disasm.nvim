@@ -18,6 +18,13 @@ This plugin works by disassembling the actual binary you have compiled on your e
 - Display assembly in a separate window with highlighting
 - Navigate to function calls under the cursor
 
+# Demos
+
+![inline asm](./doc/inline_Trim_1.0.gif.gif)
+![window asm](./doc/window_Trim_3.gif)
+![update asm](./doc/update_Trim_1.0.gif)
+![diff asm](./doc/diff_Trim_1.0.gif)
+
 # Configuration
 
 Example using [cmake-tools](https://github.com/Civitasv/cmake-tools.nvim) and lazy.

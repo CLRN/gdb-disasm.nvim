@@ -9,7 +9,7 @@ It's a [neovim](https://github.com/neovim/neovim) plugin for interactively displ
 # Why
 
 The alternatives work with [godbolt](https://godbolt.org/) and have to essentially compile your source code to get the assembly output.
-This has many complications in case your code has dependencies or nontrivial build set up.
+This has many complications in case your code has dependencies or a nontrivial build set-up.
 This plugin works by disassembling the actual binary you have compiled on your environment with your build system.
 
 # Features
@@ -24,11 +24,11 @@ This plugin works by disassembling the actual binary you have compiled on your e
 
 ![inline asm](./doc/inline_Trim_1.0.gif)
 
-### ASM in separate window with highlighting
+### ASM in a separate window with highlighting
 
 ![window asm](./doc/window_Trim_3.gif)
 
-### Auto update on build
+### Auto update on the build
 
 ![update asm](./doc/update_Trim_1.0.gif)
 

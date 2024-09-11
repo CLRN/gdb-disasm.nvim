@@ -404,6 +404,7 @@ M.new_window_disasm = function()
 
   local group_name = "Pmenu"
   job_sender.send(function(state)
+    state.func_name = ""
     vim.schedule(function()
       -- create new window and buffer
       vim.api.nvim_command("vsplit")

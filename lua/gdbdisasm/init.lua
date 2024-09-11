@@ -130,7 +130,7 @@ end
 
 local function get_current_function_name()
   local expr = get_ts_current_node()
-  return ts_utils.get_node_text(expr:child(1))[1]
+  return expr and ts_utils.get_node_text(expr:child(1))[1] or nil
 end
 
 local function start_gdb()
@@ -703,7 +703,7 @@ M.update_asm_display = function()
   local current_buf = vim.api.nvim_get_current_buf()
 
   job_sender.send(function(state)
-    if state.func_name ~= func_name then
+    if not func_name or state.func_name ~= func_name then
       return
     end
 

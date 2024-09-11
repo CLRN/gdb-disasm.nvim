@@ -22,7 +22,7 @@ This plugin works by disassembling the actual binary you have compiled on your e
 
 ### Inline assembly display and toggle
 
-![inline asm](./doc/inline_Trim_1.0.gif.gif)
+![inline asm](./doc/inline_Trim_1.0.gif)
 
 ### ASM in separate window with highlighting
 

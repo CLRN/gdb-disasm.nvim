@@ -6,7 +6,7 @@ void bm_book(benchmark::State &state) {
 
   // another use case is a quick asm diff
   for (int i = 0; i < 100; ++i) {
-    test += 0;
+    test += 1;
     test = calc(test, test + 1);
   }
 }

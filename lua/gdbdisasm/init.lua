@@ -29,6 +29,7 @@ local job_sender, job_receiver = async.control.channel.mpsc()
 ---@field disasm Disasm[]
 ---@field src_lines string[]
 ---@field ft string
+---@field inline_display_enabled boolean
 
 ---Parse assembly line to tokens
 ---@param src string
@@ -376,20 +377,21 @@ M.toggle_inline_disasm = function()
   local func_name = get_current_function_name()
 
   disasm_current_func(function(state)
-    if state.func_name == func_name and #state.disasm then
+    if state.func_name == func_name and #state.disasm and state.inline_display_enabled then
       vim.schedule(function()
         vim.api.nvim_buf_clear_namespace(current_buf, ns_id_asm, 0, -1)
       end)
 
-      state.func_name = ""
+      state.inline_display_enabled = not state.inline_display_enabled
       return true
     end
 
+    state.inline_display_enabled = not state.inline_display_enabled
     return false
   end)
 
   job_sender.send(function(state)
-    if state.func_name ~= "" then
+    if state.inline_display_enabled then
       draw_disasm_lines(current_buf, make_disasm_map(state))
     end
   end)
@@ -404,7 +406,6 @@ M.new_window_disasm = function()
 
   local group_name = "Pmenu"
   job_sender.send(function(state)
-    state.func_name = ""
     vim.schedule(function()
       -- create new window and buffer
       vim.api.nvim_command("vsplit")
@@ -687,6 +688,7 @@ M.setup = function(_)
       disasm = {},
       src_lines = {},
       ft = "",
+      inline_display_enabled = false,
     }
 
     while state.running do
@@ -713,7 +715,7 @@ M.update_asm_display = function()
 
   disasm_current_func(function(state)
     -- we have already disasmed this, so this is going to be an update
-    if func_name and state.func_name == func_name then
+    if func_name and state.func_name == func_name and state.inline_display_enabled then
       need_update = true
     end
     return not need_update

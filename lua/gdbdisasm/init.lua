@@ -691,6 +691,16 @@ M.setup = function(_)
       inline_display_enabled = false,
     }
 
+    vim.api.nvim_create_autocmd("VimLeavePre", {
+      group = group_id,
+      callback = function()
+        if state.comms then
+          state.running = false
+          state.comms({ "quit" }, true)
+        end
+      end,
+    })
+
     while state.running do
       local job = job_receiver.recv()
 

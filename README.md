@@ -32,6 +32,10 @@ This plugin works by disassembling the actual binary you have compiled on your e
 
 ![update asm](./doc/update_Trim_1.0.gif)
 
+### Jump to calls under cursor
+
+![jump to call](./doc/calls.gif)
+
 ### Diff
 
 ![diff asm](./doc/diff_Trim_1.0.gif)
